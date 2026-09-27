@@ -73,7 +73,7 @@ import { isIP } from "node:net";
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var VERSION = false ? "0.1.0" : "0.1.1";
+var VERSION = false ? "0.1.0" : "0.1.3";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -418,11 +418,17 @@ function peerRequest(options) {
       });
     });
     const timer = setTimeout(() => req.destroy(new TelephoneError("unreachable", "Peer request timed out")), options.timeout);
+    const connectTimer = options.connectTimeout === void 0 ? void 0 : setTimeout(() => req.destroy(new TelephoneError("unreachable", "Peer did not accept the connection")), options.connectTimeout);
+    req.on("socket", (socket) => socket.once("connect", () => clearTimeout(connectTimer)));
     req.on("error", (error) => {
       clearTimeout(timer);
+      clearTimeout(connectTimer);
       reject(error instanceof TelephoneError ? error : new TelephoneError("unreachable", error.message));
     });
-    req.on("close", () => clearTimeout(timer));
+    req.on("close", () => {
+      clearTimeout(timer);
+      clearTimeout(connectTimer);
+    });
     req.end(body);
   });
 }
@@ -607,29 +613,29 @@ function createExchange(options) {
   }
   async function discover() {
     const all = await peers();
-    await Promise.all(all.filter((peer) => peer.online).map(async (peer) => {
-      const cached = discovery.get(peer.fqdn);
-      if (cached && cached.at > now() - (cached.hasExchange ? 6e4 : 1e4)) return;
-      const endpoint = peerEndpoints.get(peer.fqdn);
-      const ip = endpoint?.ip ?? ipv4(peer);
-      if (!ip) {
-        discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: "No Tailscale IPv4" });
-        return;
-      }
-      try {
-        const hello = await remote(ip, endpoint?.port ?? config.port, "/v1/hello", 1500);
-        if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
-        discovery.set(peer.fqdn, { at: now(), hasExchange: true });
-      } catch (error) {
-        const reason = error instanceof TelephoneError ? error.code : "unreachable";
-        discovery.set(peer.fqdn, { at: now(), hasExchange: reason === "proto_mismatch", reason });
-      }
-      return;
-    }));
+    await Promise.all(all.filter((peer) => peer.online).map(probe));
     return all.map((peer) => ({ ...peer, hasExchange: discovery.get(peer.fqdn)?.hasExchange ?? false }));
   }
-  function remote(host, port, path, timeout, body) {
-    return peerRequest({ host, port, path, timeout, body, fromPort: options.port, localAddress: listening?.address });
+  async function probe(peer) {
+    const cached = discovery.get(peer.fqdn);
+    if (cached && cached.at > now() - (cached.hasExchange ? 6e4 : 1e4)) return;
+    const endpoint = peerEndpoints.get(peer.fqdn);
+    const ip = endpoint?.ip ?? ipv4(peer);
+    if (!ip) {
+      discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: "No Tailscale IPv4" });
+      return;
+    }
+    try {
+      const hello = await remote(ip, endpoint?.port ?? config.port, "/v1/hello", 5e3, void 0, 1500);
+      if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
+      discovery.set(peer.fqdn, { at: now(), hasExchange: true });
+    } catch (error) {
+      const reason = error instanceof TelephoneError ? error.code : "unreachable";
+      discovery.set(peer.fqdn, { at: now(), hasExchange: reason === "proto_mismatch", reason });
+    }
+  }
+  function remote(host, port, path, timeout, body, connectTimeout) {
+    return peerRequest({ host, port, path, timeout, body, connectTimeout, fromPort: options.port, localAddress: listening?.address });
   }
   function callerFor(connection) {
     return { session: connection.registration?.session.name, machine: self, local: true };
@@ -655,7 +661,7 @@ function createExchange(options) {
         self: target === connection
       });
     }
-    await Promise.all(all.filter((peer) => peer.online).map(async (peer) => {
+    async function query(peer) {
       const state = discovery.get(peer.fqdn);
       if (!peer.hasExchange) return;
       if (state?.reason) {
@@ -664,7 +670,7 @@ function createExchange(options) {
       }
       try {
         const endpoint = peerEndpoints.get(peer.fqdn);
-        const result = await remote(endpoint?.ip ?? ipv4(peer), endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ""}`, 3e3);
+        const result = await remote(endpoint?.ip ?? ipv4(peer), endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ""}`, 5e3, void 0, 1500);
         const machine2 = displayMachine(peer, self, all);
         if (!Array.isArray(result.sessions)) throw new TelephoneError("unreachable", "Invalid peer directory");
         for (const session of result.sessions) {
@@ -686,8 +692,8 @@ function createExchange(options) {
         if (reason === "not_trusted") discovery.set(peer.fqdn, { at: now(), hasExchange: true, reason });
         warnings.push(`${peer.short}: ${reason}`);
       }
-      return;
-    }));
+    }
+    await Promise.all(all.filter((peer) => peer.online).map(query));
     return { entries, warnings };
   }
   async function resolve2(to) {

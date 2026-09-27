@@ -16,10 +16,17 @@ process.env.PI_TELEPHONE_NETWORK = 'off';
 process.env.PI_TELEPHONE_IDLE_EXIT_MS = '100';
 
 class StaticIdentity implements IdentityProvider {
+  // Delays the next whois once, like a cold `tailscale whois` on a real Mac.
+  whoisDelay = 0;
   constructor(private own: MachineIdentity, private other: MachineIdentity, private machines: Map<number, MachineIdentity>) {}
   async self() { return { ...this.own, ipv4: this.own.ips[0] }; }
   async peers() { return [{ ...this.other, ips: ['127.0.0.1'], online: true }]; }
-  async whois(ip: string, hint?: { fromPort?: number }) { return ip === '127.0.0.1' && hint?.fromPort ? this.machines.get(hint.fromPort) : undefined; }
+  async whois(ip: string, hint?: { fromPort?: number }) {
+    const delay = this.whoisDelay;
+    this.whoisDelay = 0;
+    if (delay) await sleep(delay);
+    return ip === '127.0.0.1' && hint?.fromPort ? this.machines.get(hint.fromPort) : undefined;
+  }
   isTailnetAddress(ip: string) { return ip === '127.0.0.1'; }
 }
 async function ports(): Promise<[number, number]> {
@@ -62,7 +69,7 @@ async function setup(t: TestContext, differentLogin = false) {
   const a = await client(homeA, 'alice');
   const b = await client(homeB, 'bob');
   return {
-    a, b, alice, bob, homeA, homeB, portB, client,
+    a, b, alice, bob, homeA, homeB, portB, client, identityB,
     advance(ms: number) { clock += ms; },
     async stopB() { await exchangeB.stop(); },
     async restartA() { await exchangeA.stop(); exchangeA = createExchange(optsA); await exchangeA.start(); },
@@ -78,6 +85,13 @@ test('directory omits warnings for peers without an exchange', async t => {
   await f.b.phone.close();
   await f.stopB();
   assert.deepEqual((await f.a.phone.directory()).warnings, []);
+});
+
+test('a peer that answers its first request slowly still appears in the directory', async t => {
+  const f = await setup(t);
+  f.identityB.whoisDelay = 2000;
+  const { entries } = await f.a.phone.directory();
+  assert.ok(entries.some(entry => entry.session === 'bob' && !entry.local));
 });
 
 test('a: local send and reply by id', async t => {

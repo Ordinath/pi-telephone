@@ -60,7 +60,7 @@ async function serve<T>(req: IncomingMessage, res: ServerResponse, maxBytes: num
 }
 export function peerRequest<T>(options: {
   host: string; port: number; path: string; timeout: number; fromPort: number;
-  localAddress?: string; body?: unknown; maxBytes?: number;
+  localAddress?: string; body?: unknown; maxBytes?: number; connectTimeout?: number;
 }): Promise<T> {
   return new Promise((resolve, reject) => {
     const body = options.body === undefined ? undefined : JSON.stringify(options.body);
@@ -90,8 +90,12 @@ export function peerRequest<T>(options: {
       });
     });
     const timer = setTimeout(() => req.destroy(new TelephoneError('unreachable', 'Peer request timed out')), options.timeout);
-    req.on('error', error => { clearTimeout(timer); reject(error instanceof TelephoneError ? error : new TelephoneError('unreachable', error.message)); });
-    req.on('close', () => clearTimeout(timer));
+    // A peer that accepted the connection may still need seconds to identify the caller with `tailscale whois`.
+    const connectTimer = options.connectTimeout === undefined ? undefined
+      : setTimeout(() => req.destroy(new TelephoneError('unreachable', 'Peer did not accept the connection')), options.connectTimeout);
+    req.on('socket', socket => socket.once('connect', () => clearTimeout(connectTimer)));
+    req.on('error', error => { clearTimeout(timer); clearTimeout(connectTimer); reject(error instanceof TelephoneError ? error : new TelephoneError('unreachable', error.message)); });
+    req.on('close', () => { clearTimeout(timer); clearTimeout(connectTimer); });
     req.end(body);
   });
 }

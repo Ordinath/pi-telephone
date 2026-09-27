@@ -169,26 +169,26 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   }
   async function discover(): Promise<Peer[]> {
     const all = await peers();
-    await Promise.all(all.filter(peer => peer.online).map(async peer => {
-      const cached = discovery.get(peer.fqdn);
-      if (cached && cached.at > now() - (cached.hasExchange ? 60000 : 10000)) return;
-      const endpoint = peerEndpoints.get(peer.fqdn);
-      const ip = endpoint?.ip ?? ipv4(peer);
-      if (!ip) { discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: 'No Tailscale IPv4' }); return; }
-      try {
-        const hello = await remote<NetworkHello>(ip, endpoint?.port ?? config.port, '/v1/hello', 1500);
-        if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
-        discovery.set(peer.fqdn, { at: now(), hasExchange: true });
-      } catch (error) {
-        const reason = error instanceof TelephoneError ? error.code : 'unreachable';
-        discovery.set(peer.fqdn, { at: now(), hasExchange: reason === 'proto_mismatch', reason });
-      }
-      return;
-    }));
+    await Promise.all(all.filter(peer => peer.online).map(probe));
     return all.map(peer => ({ ...peer, hasExchange: discovery.get(peer.fqdn)?.hasExchange ?? false }));
   }
-  function remote<T>(host: string, port: number, path: string, timeout: number, body?: NetworkDelivery): Promise<T> {
-    return peerRequest<T>({ host, port, path, timeout, body, fromPort: options.port, localAddress: listening?.address });
+  async function probe(peer: Peer): Promise<void> {
+    const cached = discovery.get(peer.fqdn);
+    if (cached && cached.at > now() - (cached.hasExchange ? 60000 : 10000)) return;
+    const endpoint = peerEndpoints.get(peer.fqdn);
+    const ip = endpoint?.ip ?? ipv4(peer);
+    if (!ip) { discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: 'No Tailscale IPv4' }); return; }
+    try {
+      const hello = await remote<NetworkHello>(ip, endpoint?.port ?? config.port, '/v1/hello', 5000, undefined, 1500);
+      if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
+      discovery.set(peer.fqdn, { at: now(), hasExchange: true });
+    } catch (error) {
+      const reason = error instanceof TelephoneError ? error.code : 'unreachable';
+      discovery.set(peer.fqdn, { at: now(), hasExchange: reason === 'proto_mismatch', reason });
+    }
+  }
+  function remote<T>(host: string, port: number, path: string, timeout: number, body?: NetworkDelivery, connectTimeout?: number): Promise<T> {
+    return peerRequest<T>({ host, port, path, timeout, body, connectTimeout, fromPort: options.port, localAddress: listening?.address });
   }
   function callerFor(connection: Connection): Caller {
     return { session: connection.registration?.session.name, machine: self, local: true };
@@ -205,13 +205,13 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       entries.push({ address: formatAddress(registration.session.name, machine), session: registration.session.name, machine, fqdn: self.fqdn,
         harness: registration.session.harness, status: registration.status, cwd: registration.session.cwd, local: true, self: target === connection });
     }
-    await Promise.all(all.filter(peer => peer.online).map(async peer => {
+    async function query(peer: Peer): Promise<void> {
       const state = discovery.get(peer.fqdn);
       if (!peer.hasExchange) return;
       if (state?.reason) { warnings.push(`${peer.short}: ${state.reason}`); return; }
       try {
         const endpoint = peerEndpoints.get(peer.fqdn);
-        const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ''}`, 3000);
+        const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ''}`, 5000, undefined, 1500);
         const machine = displayMachine(peer, self, all);
         if (!Array.isArray(result.sessions)) throw new TelephoneError('unreachable', 'Invalid peer directory');
         for (const session of result.sessions) {
@@ -226,8 +226,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
         if (reason === 'not_trusted') discovery.set(peer.fqdn, { at: now(), hasExchange: true, reason });
         warnings.push(`${peer.short}: ${reason}`);
       }
-      return;
-    }));
+    }
+    await Promise.all(all.filter(peer => peer.online).map(query));
     return { entries, warnings };
   }
   async function resolve(to: string): Promise<Route> {

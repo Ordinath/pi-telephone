@@ -67,7 +67,7 @@ function readFrames(socket, receive) {
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var VERSION = false ? "0.1.0" : "0.1.1";
+var VERSION = false ? "0.1.0" : "0.1.3";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
