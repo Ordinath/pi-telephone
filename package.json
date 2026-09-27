@@ -32,7 +32,7 @@
     ]
   },
   "bin": {
-    "pi-telephone": "./dist/cli.mjs"
+    "pi-telephone": "dist/cli.mjs"
   },
   "scripts": {
     "build": "node build.mjs",
