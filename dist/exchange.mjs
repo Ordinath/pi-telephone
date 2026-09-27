@@ -124,7 +124,7 @@ function ipv4(machine2) {
 
 // src/identity.ts
 function machine(name, ips, user) {
-  if (!name || !user?.LoginName || !Array.isArray(ips)) throw new Error("Incomplete Tailscale identity");
+  if (!name || !user?.LoginName || !Array.isArray(ips) || !ips.length) throw new Error("Incomplete Tailscale identity");
   const fqdn = normalizeMachine(name);
   return { fqdn, short: fqdn.split(".")[0], login: user.LoginName, displayName: user.DisplayName, ips };
 }
@@ -132,10 +132,14 @@ function parseStatus(value) {
   if (value.BackendState !== void 0 && value.BackendState !== "Running") throw new Error("Tailscale is not running");
   const parseNode = (node) => machine(node.DNSName, node.TailscaleIPs, value.User[String(node.UserID)]);
   const self = parseNode(value.Self);
-  return {
-    self: { ...self, ipv4: ipv4(self) },
-    peers: Object.values(value.Peer ?? {}).map((node) => ({ ...parseNode(node), online: node.Online === true }))
-  };
+  const peers = [];
+  for (const node of Object.values(value.Peer ?? {})) {
+    try {
+      peers.push({ ...parseNode(node), online: node.Online === true });
+    } catch {
+    }
+  }
+  return { self: { ...self, ipv4: ipv4(self) }, peers };
 }
 function parseWhois(value) {
   return machine(value.Node.Name, value.Node.Addresses.map((address) => address.split("/")[0]), value.UserProfile);
@@ -411,6 +415,11 @@ function createExchange(options) {
   let listening = null;
   let network;
   let networkRefresh;
+  let initialRefreshDone;
+  const initialRefresh = new Promise((resolve3) => {
+    initialRefreshDone = resolve3;
+  });
+  let lastNetworkState;
   let retryTimer;
   let idleTimer;
   let stopping;
@@ -508,6 +517,12 @@ function createExchange(options) {
     for (const send2 of pendingSends.values()) if (send2.sessionKey === session.key) send2.cancelled = true;
     connection.registration = void 0;
   }
+  function logNetworkState() {
+    const address2 = listening?.address ?? null;
+    if (lastNetworkState === address2) return;
+    lastNetworkState = address2;
+    void log(options.home, "info", address2 ? `Listening on ${address2}:${options.port}` : "Running local-only");
+  }
   async function refreshNetwork() {
     if (stopping) return;
     try {
@@ -522,7 +537,10 @@ function createExchange(options) {
         network = void 0;
         listening = null;
       }
-      if (!host) return;
+      if (!host) {
+        logNetworkState();
+        return;
+      }
       const server = networkServer(config.maxMessageBytes + 16384, handleNetwork);
       try {
         await listen(server, host, options.port);
@@ -532,12 +550,12 @@ function createExchange(options) {
       }
       network = server;
       listening = { address: host, port: options.port };
-      void log(options.home, "info", `Listening on ${host}:${options.port}`);
+      logNetworkState();
     } catch {
       if (network) await closeServer(network);
       network = void 0;
       listening = null;
-      void log(options.home, "info", "Running local-only");
+      logNetworkState();
     }
   }
   async function peers() {
@@ -551,7 +569,7 @@ function createExchange(options) {
     const all = await peers();
     await Promise.all(all.filter((peer) => peer.online).map(async (peer) => {
       const cached = discovery.get(peer.fqdn);
-      if (cached && cached.at > now() - 6e4) return;
+      if (cached && cached.at > now() - (cached.hasExchange ? 6e4 : 1e4)) return;
       const endpoint = peerEndpoints.get(peer.fqdn);
       const ip = endpoint?.ip ?? ipv4(peer);
       if (!ip) {
@@ -563,7 +581,8 @@ function createExchange(options) {
         if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
         discovery.set(peer.fqdn, { at: now(), hasExchange: true });
       } catch (error) {
-        discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: error instanceof TelephoneError ? error.code : "unreachable" });
+        const reason = error instanceof TelephoneError ? error.code : "unreachable";
+        discovery.set(peer.fqdn, { at: now(), hasExchange: reason === "proto_mismatch", reason });
       }
       return;
     }));
@@ -598,8 +617,9 @@ function createExchange(options) {
     }
     await Promise.all(all.filter((peer) => peer.online).map(async (peer) => {
       const state = discovery.get(peer.fqdn);
-      if (!peer.hasExchange || state?.reason === "not_trusted") {
-        warnings.push(`${peer.short}: ${state?.reason ?? "unreachable"}`);
+      if (!peer.hasExchange) return;
+      if (state?.reason) {
+        warnings.push(`${peer.short}: ${state.reason}`);
         return;
       }
       try {
@@ -758,6 +778,7 @@ function createExchange(options) {
     const fromPort = isDelivery && isObject(input.body) && typeof input.body.fromPort === "number" ? input.body.fromPort : input.fromPort;
     const machine2 = await options.identity.whois(input.sourceIP, { fromPort });
     if (!machine2) throw new TelephoneError("forbidden");
+    discovery.set(machine2.fqdn, { at: now(), hasExchange: true });
     const body = isDelivery ? validateDelivery(input.body) : void 0;
     if (input.method === "GET" && input.url.pathname === "/v1/hello") return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
     if (body) {
@@ -786,6 +807,7 @@ function createExchange(options) {
     return { fqdn: self.fqdn, short: self.short, login: self.login };
   }
   async function handleLocal(connection, request2) {
+    await initialRefresh;
     if (request2.t === "hello") {
       if (request2.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
       connection.hello = true;
@@ -872,9 +894,13 @@ function createExchange(options) {
         resolve3();
       });
     });
-    await chmod2(p2.socket, 384);
-    networkRefresh = refreshNetwork();
-    await networkRefresh;
+    try {
+      await chmod2(p2.socket, 384);
+      networkRefresh = refreshNetwork();
+      await networkRefresh;
+    } finally {
+      initialRefreshDone();
+    }
     if (stopping) return;
     retryTimer = setInterval(() => {
       networkRefresh = refreshNetwork();
@@ -1000,8 +1026,8 @@ try {
   exchange = createExchange({ home: p.home, identity, port: config.port, idleExitMs });
   await exchange.start();
   await log(p.home, "info", `Exchange started pid=${process.pid}`);
-} catch {
-  await log(p.home, "error", "Exchange startup failed");
+} catch (error) {
+  await log(p.home, "error", `Exchange startup failed: ${error instanceof Error ? error.message : String(error)}`);
   await cleanup();
   process.exitCode = 1;
 }

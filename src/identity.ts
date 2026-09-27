@@ -16,7 +16,7 @@ interface User { LoginName: string; DisplayName?: string }
 interface StatusJson { BackendState?: string; Self: StatusNode; Peer?: Record<string, StatusNode>; User: Record<string, User> }
 interface WhoisJson { Node: { Name: string; Addresses: string[] }; UserProfile: User }
 function machine(name: string, ips: string[], user: User): MachineIdentity {
-  if (!name || !user?.LoginName || !Array.isArray(ips)) throw new Error('Incomplete Tailscale identity');
+  if (!name || !user?.LoginName || !Array.isArray(ips) || !ips.length) throw new Error('Incomplete Tailscale identity');
   const fqdn = normalizeMachine(name);
   return { fqdn, short: fqdn.split('.')[0], login: user.LoginName, displayName: user.DisplayName, ips };
 }
@@ -24,10 +24,12 @@ export function parseStatus(value: StatusJson) {
   if (value.BackendState !== undefined && value.BackendState !== 'Running') throw new Error('Tailscale is not running');
   const parseNode = (node: StatusNode) => machine(node.DNSName, node.TailscaleIPs, value.User[String(node.UserID)]);
   const self = parseNode(value.Self);
-  return {
-    self: { ...self, ipv4: ipv4(self) },
-    peers: Object.values(value.Peer ?? {}).map(node => ({ ...parseNode(node), online: node.Online === true })),
-  };
+  const peers: (MachineIdentity & { online: boolean })[] = [];
+  for (const node of Object.values(value.Peer ?? {})) {
+    try { peers.push({ ...parseNode(node), online: node.Online === true }); }
+    catch { /* Skip incomplete peer entries. */ }
+  }
+  return { self: { ...self, ipv4: ipv4(self) }, peers };
 }
 export function parseWhois(value: WhoisJson): MachineIdentity {
   return machine(value.Node.Name, value.Node.Addresses.map(address => address.split('/')[0]), value.UserProfile);

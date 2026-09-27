@@ -3,6 +3,17 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseStatus, parseWhois, TailscaleIdentityProvider } from '../src/identity.js';
 
+test('parseStatus skips incomplete peers but not incomplete self', async () => {
+  const status = JSON.parse(await readFile(new URL('./fixtures/status.json', import.meta.url), 'utf8'));
+  status.Peer['missing-dns'] = { ...status.Peer['nodekey:fake-shared-key'], DNSName: '' };
+  status.Peer['missing-ips'] = { ...status.Peer['nodekey:fake-shared-key'], TailscaleIPs: undefined };
+  status.Peer['empty-ips'] = { ...status.Peer['nodekey:fake-shared-key'], TailscaleIPs: [] };
+  status.Peer['missing-user'] = { ...status.Peer['nodekey:fake-shared-key'], UserID: 9999 };
+  assert.equal(parseStatus(status).peers.length, 2);
+  status.Self.DNSName = '';
+  assert.throws(() => parseStatus(status), /Incomplete Tailscale identity/);
+});
+
 test('parse sanitized status and whois, including shared-in nodes', async () => {
   const status = parseStatus(JSON.parse(await readFile(new URL('./fixtures/status.json', import.meta.url), 'utf8')));
   const whois = parseWhois(JSON.parse(await readFile(new URL('./fixtures/whois.json', import.meta.url), 'utf8')));

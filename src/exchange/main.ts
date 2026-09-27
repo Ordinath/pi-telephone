@@ -59,8 +59,8 @@ try {
   exchange = createExchange({ home: p.home, identity, port: config.port, idleExitMs });
   await exchange.start();
   await log(p.home, 'info', `Exchange started pid=${process.pid}`);
-} catch {
-  await log(p.home, 'error', 'Exchange startup failed');
+} catch (error) {
+  await log(p.home, 'error', `Exchange startup failed: ${error instanceof Error ? error.message : String(error)}`);
   await cleanup();
   process.exitCode = 1;
 }

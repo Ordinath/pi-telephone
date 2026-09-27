@@ -40,6 +40,9 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   let listening: ExchangeInfo['listening'] = null;
   let network: HttpServer | undefined;
   let networkRefresh: Promise<void> | undefined;
+  let initialRefreshDone: () => void;
+  const initialRefresh = new Promise<void>(resolve => { initialRefreshDone = resolve; });
+  let lastNetworkState: string | null | undefined;
   let retryTimer: NodeJS.Timeout | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let stopping: Promise<void> | undefined;
@@ -129,6 +132,12 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     for (const send of pendingSends.values()) if (send.sessionKey === session.key) send.cancelled = true;
     connection.registration = undefined;
   }
+  function logNetworkState(): void {
+    const address = listening?.address ?? null;
+    if (lastNetworkState === address) return;
+    lastNetworkState = address;
+    void log(options.home, 'info', address ? `Listening on ${address}:${options.port}` : 'Running local-only');
+  }
   async function refreshNetwork(): Promise<void> {
     if (stopping) return;
     try {
@@ -139,18 +148,18 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       if (host && !options.listenHost && !options.identity.isTailnetAddress(host)) throw new Error('Not a Tailscale address');
       if (host === listening?.address) return;
       if (network) { await closeServer(network); network = undefined; listening = null; }
-      if (!host) return;
+      if (!host) { logNetworkState(); return; }
       const server = networkServer(config.maxMessageBytes + 16384, handleNetwork);
       try { await listen(server, host, options.port); }
       catch (error) { await closeServer(server); throw error; }
       network = server;
       listening = { address: host, port: options.port };
-      void log(options.home, 'info', `Listening on ${host}:${options.port}`);
+      logNetworkState();
     } catch {
       if (network) await closeServer(network);
       network = undefined;
       listening = null;
-      void log(options.home, 'info', 'Running local-only');
+      logNetworkState();
     }
   }
   async function peers(): Promise<Peer[]> {
@@ -160,7 +169,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const all = await peers();
     await Promise.all(all.filter(peer => peer.online).map(async peer => {
       const cached = discovery.get(peer.fqdn);
-      if (cached && cached.at > now() - 60000) return;
+      if (cached && cached.at > now() - (cached.hasExchange ? 60000 : 10000)) return;
       const endpoint = peerEndpoints.get(peer.fqdn);
       const ip = endpoint?.ip ?? ipv4(peer);
       if (!ip) { discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: 'No Tailscale IPv4' }); return; }
@@ -169,7 +178,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
         if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
         discovery.set(peer.fqdn, { at: now(), hasExchange: true });
       } catch (error) {
-        discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: error instanceof TelephoneError ? error.code : 'unreachable' });
+        const reason = error instanceof TelephoneError ? error.code : 'unreachable';
+        discovery.set(peer.fqdn, { at: now(), hasExchange: reason === 'proto_mismatch', reason });
       }
       return;
     }));
@@ -195,7 +205,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     }
     await Promise.all(all.filter(peer => peer.online).map(async peer => {
       const state = discovery.get(peer.fqdn);
-      if (!peer.hasExchange || state?.reason === 'not_trusted') { warnings.push(`${peer.short}: ${state?.reason ?? 'unreachable'}`); return; }
+      if (!peer.hasExchange) return;
+      if (state?.reason) { warnings.push(`${peer.short}: ${state.reason}`); return; }
       try {
         const endpoint = peerEndpoints.get(peer.fqdn);
         const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ''}`, 3000);
@@ -313,6 +324,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const fromPort = isDelivery && isObject(input.body) && typeof input.body.fromPort === 'number' ? input.body.fromPort : input.fromPort;
     const machine = await options.identity.whois(input.sourceIP, { fromPort });
     if (!machine) throw new TelephoneError('forbidden');
+    discovery.set(machine.fqdn, { at: now(), hasExchange: true });
     const body = isDelivery ? validateDelivery(input.body) : undefined;
     if (input.method === 'GET' && input.url.pathname === '/v1/hello') return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
     if (body) { await deliver(body, machine, false, input.sourceIP); return { body: { status: 'delivered' } }; }
@@ -332,6 +344,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   }
   function machineInfo(): ExchangeInfo['machine'] { return { fqdn: self.fqdn, short: self.short, login: self.login }; }
   async function handleLocal(connection: Connection, request: Request): Promise<Record<string, unknown>> {
+    await initialRefresh;
     if (request.t === 'hello') {
       if (request.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
       connection.hello = true;
@@ -402,9 +415,11 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       local.once('error', reject);
       local.listen(p.socket, () => { local.off('error', reject); ownsSocket = true; resolve(); });
     });
-    await chmod(p.socket, 0o600);
-    networkRefresh = refreshNetwork();
-    await networkRefresh;
+    try {
+      await chmod(p.socket, 0o600);
+      networkRefresh = refreshNetwork();
+      await networkRefresh;
+    } finally { initialRefreshDone(); }
     if (stopping) return;
     retryTimer = setInterval(() => { networkRefresh = refreshNetwork(); }, 30000);
     scheduleIdle();

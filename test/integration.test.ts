@@ -63,6 +63,7 @@ async function setup(t: TestContext, differentLogin = false) {
   return {
     a, b, alice, bob, homeA, homeB, client,
     advance(ms: number) { clock += ms; },
+    async stopB() { await exchangeB.stop(); },
     async restartA() { await exchangeA.stop(); exchangeA = createExchange(optsA); await exchangeA.start(); },
   };
 }
@@ -70,6 +71,13 @@ async function until(predicate: () => boolean): Promise<void> {
   const deadline = Date.now() + 3000;
   while (!predicate()) { if (Date.now() > deadline) throw new Error('Condition timed out'); await sleep(10); }
 }
+
+test('directory omits warnings for peers without an exchange', async t => {
+  const f = await setup(t);
+  await f.b.phone.close();
+  await f.stopB();
+  assert.deepEqual((await f.a.phone.directory()).warnings, []);
+});
 
 test('a: local send and reply by id', async t => {
   const f = await setup(t);

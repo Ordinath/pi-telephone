@@ -55,7 +55,9 @@ export class TelephoneClient extends EventEmitter {
         if (!isFsError(error, 'ENOENT') && !isFsError(error, 'ECONNREFUSED')) throw error;
         if (!spawned) {
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
-          const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore', env: { ...process.env, PI_TELEPHONE_HOME: this.home } });
+          const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+            ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'].includes(key) || key.startsWith('PI_TELEPHONE_')));
+          const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore', env: { ...env, PI_TELEPHONE_HOME: this.home } });
           child.on('error', () => {});
           child.unref();
           spawned = true;
