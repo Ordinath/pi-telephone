@@ -1,0 +1,13 @@
+{
+  "name": "pi-telephone",
+  "owner": {
+    "name": "Nikita Sklyarov"
+  },
+  "plugins": [
+    {
+      "name": "telephone",
+      "source": "./",
+      "description": "Call and message other agent sessions across your private tailnet."
+    }
+  ]
+}
