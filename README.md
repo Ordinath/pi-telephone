@@ -26,15 +26,18 @@ An inbound message wakes an idle session, the agent answers with a reply, and th
 Pi:
 
 ```sh
-pi install git:github.com/Ordinath/pi-telephone
+pi install npm:pi-telephone
 ```
 
-Claude Code:
+Claude Code (the package is also a local plugin marketplace):
 
 ```sh
-claude plugin marketplace add Ordinath/pi-telephone
+npm install -g pi-telephone
+claude plugin marketplace add "$(npm root -g)/pi-telephone"
 claude plugin install telephone@pi-telephone
 ```
+
+The global install also puts the `pi-telephone` command on your PATH; `npm update -g pi-telephone` updates the plugin in place.
 
 ## Use
 
@@ -56,7 +59,7 @@ Allowlist entries: `owner` (your own sessions, the default), `local` (this machi
 ## Connecting two people
 
 1. In Tailscale, share a machine with each other, in both directions.
-2. Each side trusts the other's Tailscale login: `/telephone trust friend@example.com` in Pi, `/telephone:trust friend@example.com` in Claude Code, or `node <package>/dist/cli.mjs trust friend@example.com`.
+2. Each side trusts the other's Tailscale login: `/telephone trust friend@example.com` in Pi, `/telephone:trust friend@example.com` in Claude Code, or `npx pi-telephone trust friend@example.com`.
 3. In each session that should take their calls: `/telephone allow user:friend@example.com`.
 
 ## Security model
@@ -69,7 +72,7 @@ Allowlist entries: `owner` (your own sessions, the default), `local` (this machi
 
 ## Troubleshooting
 
-- `node <package>/dist/cli.mjs status` shows the exchange, its Tailscale address, trusted users and local sessions; `list` shows every reachable session.
+- `npx pi-telephone status` shows the exchange, its Tailscale address, trusted users and local sessions; `npx pi-telephone list` shows every reachable session.
 - The exchange logs to `~/.pi-telephone/exchange.log`.
 - With the macOS application firewall on, allow incoming connections for `node`.
 - Claude Code's `crossSessionInbound` setting applies to telephone calls: `refuse` drops them and `hold` waits for your approval.

@@ -117,7 +117,7 @@ server.registerTool('telephone', {
         text = [
           `Telephone: ${address ? 'on' : 'off'}`, `Address: ${address ?? 'none'}`, `Allowlist: ${allow.join(', ') || 'none'}`,
           `Exchange machine: ${info.machine.fqdn}`, `Tailnet listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : 'no (local-only)'}`,
-          `Owner: ${owner}`, `Trusted users: ${config.trustedUsers.join(', ') || 'none'}`,
+          `Owner: ${owner || 'unknown (Tailscale unavailable)'}`, `Trusted users: ${config.trustedUsers.join(', ') || 'none'}`,
         ].join('\n');
         break;
       }

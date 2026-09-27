@@ -37005,7 +37005,7 @@ server.registerTool("telephone", {
           `Allowlist: ${allow.join(", ") || "none"}`,
           `Exchange machine: ${info.machine.fqdn}`,
           `Tailnet listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : "no (local-only)"}`,
-          `Owner: ${owner}`,
+          `Owner: ${owner || "unknown (Tailscale unavailable)"}`,
           `Trusted users: ${config2.trustedUsers.join(", ") || "none"}`
         ].join("\n");
         break;

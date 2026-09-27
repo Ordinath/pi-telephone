@@ -143,7 +143,7 @@ export default function telephone(pi: ExtensionAPI) {
       `Allow: ${session.state.allow.join(', ') || '(none)'}`,
       `Exchange machine: ${info.machine.fqdn}`,
       `Tailnet listener: ${info.listening ? `${info.listening.address}:${info.listening.port}` : 'off (local only)'}`,
-      `Trusted users: ${config.trustedUsers.join(', ') || '(none)'}; owner ${owner} is always trusted`,
+      `Trusted users: ${config.trustedUsers.join(', ') || '(none)'}; ${owner ? `owner ${owner} is always trusted` : 'owner unknown (Tailscale unavailable)'}`,
     ].join('\n');
   }
 
