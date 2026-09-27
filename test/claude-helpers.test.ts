@@ -19,7 +19,7 @@ test('Claude reply target prefers the latest unanswered call, then the latest me
   assert.equal(replyTarget(messages, 'answered').id, 'answered');
   assert.equal(replyTarget(messages, 'note').id, 'note');
   assert.throws(() => replyTarget([], undefined), /No inbound telephone message to reply to/);
-  assert.throws(() => replyTarget(messages, 'missing'), /No inbound telephone message with id missing/);
+  assert.deepEqual(replyTarget(messages, 'missing'), { id: 'missing' });
 });
 
 test('Claude inbound history keeps only messages received within the last 24 hours', () => {

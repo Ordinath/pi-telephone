@@ -18,11 +18,11 @@ export function rememberInbound(messages: InboundRecord[], message: InboundMessa
     id: message.id, from: message.from.address, expectReply: message.expectReply, answered: false, receivedAt: now,
   }];
 }
-export function replyTarget(messages: InboundRecord[], replyTo?: string): InboundRecord {
+export function replyTarget(messages: InboundRecord[], replyTo?: string): { id: string; from?: string } {
+  if (replyTo !== undefined) return messages.find(message => message.id === replyTo) ?? { id: replyTo };
   const newestFirst = [...messages].reverse();
-  const target = replyTo !== undefined ? messages.find(message => message.id === replyTo)
-    : newestFirst.find(message => message.expectReply && !message.answered) ?? newestFirst[0];
-  if (!target) throw new Error(replyTo === undefined ? 'No inbound telephone message to reply to.' : `No inbound telephone message with id ${replyTo}.`);
+  const target = newestFirst.find(message => message.expectReply && !message.answered) ?? newestFirst[0];
+  if (!target) throw new Error('No inbound telephone message to reply to.');
   return target;
 }
 export function markAnswered(messages: InboundRecord[], id: string | undefined): InboundRecord[] {

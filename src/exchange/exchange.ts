@@ -218,7 +218,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           if (!isObject(session) || !validName(session.session) || !validHarness(session.harness) ||
               (session.status !== 'idle' && session.status !== 'busy')) continue;
           entries.push({ session: session.session, harness: session.harness, status: session.status,
-            ...(typeof session.cwd === 'string' && session.cwd.length <= 1024 ? { cwd: session.cwd } : {}),
+            ...(self.login && peer.login.toLowerCase() === self.login.toLowerCase() && typeof session.cwd === 'string' && session.cwd.length <= 1024 && !/[\x00-\x1f\x7f-\x9f]/.test(session.cwd) ? { cwd: session.cwd } : {}),
             address: formatAddress(session.session, machine), machine, fqdn: peer.fqdn, local: false, self: false });
         }
       } catch (error) {

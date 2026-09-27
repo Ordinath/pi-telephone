@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { validName } from '../src/addresses.js';
 import { TelephoneClient, TelephoneError } from '../src/client.js';
 import { renderInbound } from '../src/framing.js';
+import { describeAllowEntry } from '../src/policy.js';
 import { VERSION, type ExchangeInfo, type InboundMessage } from '../src/protocol.js';
 import { markAnswered, nameCandidates, recentInbound, rememberInbound, replyTarget, type InboundRecord } from './helpers.js';
 
@@ -15,6 +16,7 @@ const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const inbox = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
 const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
 const noInbox = 'This Claude Code session has no cross-session inbox, so it cannot receive calls. It needs Claude Code 2.1.224 or later (2.1.248 or later when CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set), and it is off in --bare mode.';
+const replyHint = 'Reply with the telephone tool (mcp__plugin_telephone_telephone__telephone), action "reply".';
 let name: string | undefined;
 let address: string | undefined;
 let allow = ['owner'];
@@ -24,7 +26,7 @@ let asking = false;
 
 async function deliver(message: InboundMessage): Promise<{ accepted: boolean; reason?: string }> {
   if (!inbox) return { accepted: false, reason: noInbox };
-  const text = renderInbound(message, { ownerLogin, replyHint: 'Reply with the telephone tool (mcp__plugin_telephone_telephone__telephone), action "reply".' });
+  const text = renderInbound(message, { ownerLogin, replyHint });
   try {
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(inbox);
@@ -60,7 +62,8 @@ async function turnOn(explicit?: string): Promise<string> {
       name = candidate;
       return `Telephone on: ${address}`;
     } catch (error) {
-      if (!(error instanceof TelephoneError) || error.code !== 'name_taken' || candidate === candidates[candidates.length - 1]) throw error;
+      if (!(error instanceof TelephoneError) || error.code !== 'name_taken') throw error;
+      if (candidate === candidates[candidates.length - 1]) throw new Error(`The telephone name ${candidate} is already used by another live session on this machine.`);
     }
   }
   throw new Error('No available telephone name.');
@@ -83,7 +86,7 @@ async function confirm(message: string, command: string, signal: AbortSignal): P
       requestedSchema: {
         type: 'object', properties: { approve: { type: 'boolean', title: 'Approve this access change?' } }, required: ['approve'],
       },
-    }, { signal });
+    }, { signal, timeout: 600000 });
     if (result.action === 'accept' && result.content?.approve === true) return;
   } catch {
     // Unsupported elicitation must never grant access.
@@ -154,7 +157,7 @@ server.registerTool('telephone', {
         try {
           const { sent, reply } = await client.ask({ to, text: message, timeoutMs: (args.timeoutSec ?? 600) * 1000, signal: extra.signal });
           inbound = rememberInbound(markAnswered(inbound, sent.inferredReplyTo), reply, Date.now());
-          text = `Reply from ${reply.from.address}:\n${reply.text}`;
+          text = renderInbound(reply, { ownerLogin, replyHint });
         } finally {
           clearInterval(timer);
           asking = false;
@@ -164,7 +167,7 @@ server.registerTool('telephone', {
       case 'reply': {
         requireOn();
         const target = replyTarget(inbound, args.replyTo);
-        const sent = await client.send({ replyTo: target.id, text: required(args.message, 'message') });
+        const sent = await client.send({ to: target.from, replyTo: target.id, text: required(args.message, 'message') });
         inbound = markAnswered(inbound, target.id);
         text = `Reply delivered to ${sent.to} (message id ${sent.id})`;
         break;
@@ -173,7 +176,7 @@ server.registerTool('telephone', {
       case 'revoke': {
         requireOn();
         const entry = required(args.entry, 'entry').trim().toLowerCase();
-        if (args.action === 'allow') await confirm(`Allow callers matching "${entry}" to reach this telephone session?`, `/telephone:allow ${entry}`, extra.signal);
+        if (args.action === 'allow') await confirm(`Allow callers matching "${entry}" to reach this telephone session? ${describeAllowEntry(entry)}`, `/telephone:allow ${entry}`, extra.signal);
         requireOn();
         const next = args.action === 'allow' ? [...new Set([...allow, entry])] : allow.filter(value => value !== entry);
         address = await client.update({ allow: next });
@@ -184,7 +187,7 @@ server.registerTool('telephone', {
       case 'trust':
       case 'untrust': {
         const login = required(args.login, 'login').trim().toLowerCase();
-        if (args.action === 'trust') await confirm(`Trust Tailscale user "${login}" to reach this machine's exchange? Session allowlists still apply.`, `/telephone:trust ${login}`, extra.signal);
+        if (args.action === 'trust') await confirm(`Trust Tailscale user "${login}"? Every machine owned by this Tailscale user can reach this machine's exchange. Session allowlists still apply.`, `/telephone:trust ${login}`, extra.signal);
         const result = await client.setTrustedUsers(args.action === 'trust' ? { add: [login] } : { remove: [login] });
         text = `Trusted users: ${result.trustedUsers.join(', ') || 'none'}`;
         break;

@@ -667,7 +667,7 @@ function createExchange(options) {
             session: session.session,
             harness: session.harness,
             status: session.status,
-            ...typeof session.cwd === "string" && session.cwd.length <= 1024 ? { cwd: session.cwd } : {},
+            ...self.login && peer.login.toLowerCase() === self.login.toLowerCase() && typeof session.cwd === "string" && session.cwd.length <= 1024 && !/[\x00-\x1f\x7f-\x9f]/.test(session.cwd) ? { cwd: session.cwd } : {},
             address: formatAddress(session.session, machine2),
             machine: machine2,
             fqdn: peer.fqdn,

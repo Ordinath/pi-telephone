@@ -1,5 +1,6 @@
 {
   "name": "pi-telephone",
+  "description": "Call and message agent sessions across machines on your private tailnet.",
   "owner": {
     "name": "Nikita Sklyarov"
   },

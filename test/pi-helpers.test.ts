@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validName } from '../src/addresses.js';
 import {
-  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreState, timeoutMs,
+  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
   type ReceivedMessage,
 } from '../pi/helpers.js';
 
@@ -66,6 +66,23 @@ test('state restores only the last telephone custom entry and copies its allowli
     assert.deepEqual(restoreState([{ type: 'custom', customType: 'telephone-state', data }]), { on: false, allow: ['owner'] });
   }
   assert.deepEqual(restoreState([{ type: 'custom', customType: 'telephone-state', data: { on: false, name: 'alpha', allow: [] } }]), { on: false, name: 'alpha', allow: [] });
+});
+
+test('inbox restores telephone messages on the branch within 24 hours', () => {
+  const inbound = (id: string, receivedAt: number) => ({
+    type: 'custom_message', customType: 'telephone', timestamp: new Date(receivedAt).toISOString(),
+    details: { id, from: { address: 'caller@machine' }, expectReply: true, sentAt: new Date(receivedAt - 1000).toISOString() },
+  });
+  const entries = [inbound('expired', now - 86_400_000), inbound('first', now - 5000),
+    { type: 'custom_message', customType: 'other', timestamp: new Date(now).toISOString(), details: inbound('wrong', now).details },
+    { type: 'custom_message', customType: 'telephone', timestamp: 'bad date', details: inbound('bad', now).details },
+    inbound('latest', now - 1000)];
+  const restored = restoreInbox(entries, now);
+  assert.deepEqual(restored, [message('first', { receivedAt: now - 5000 }), message('latest')]);
+  assert.equal(replyTarget(restored, undefined, now), 'latest');
+  restored[1].answered = true;
+  assert.equal(replyTarget(restored, undefined, now), 'first');
+  assert.equal(restoreInbox(entries, now).at(-1)?.answered, false);
 });
 
 test('required fields and ask timeouts reject invalid values', () => {

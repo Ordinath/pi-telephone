@@ -19,6 +19,17 @@ export function parseAllowEntry(value: string): AllowEntry {
   }
   throw new TelephoneError('invalid_allow', `Invalid allowlist entry: ${value}`);
 }
+export function describeAllowEntry(value: string): string {
+  const entry = parseAllowEntry(value);
+  switch (entry.kind) {
+    case 'owner': return "Your own sessions, including sessions on this machine.";
+    case 'local': return 'Sessions on this machine.';
+    case 'any': return 'Any caller on a machine this machine trusts.';
+    case 'user': return `Every session of Tailscale user ${entry.login}.`;
+    case 'address': return entry.session === '*' ? `Every session on ${entry.machine === '*' ? 'any machine' : entry.machine}.`
+      : `The session ${entry.session} on ${entry.machine === '*' ? 'any machine' : entry.machine}.`;
+  }
+}
 export function validateAllow(allow: string[]): void {
   if (!Array.isArray(allow) || !allow.every(entry => typeof entry === 'string')) throw new TelephoneError('invalid_allow');
   allow.forEach(parseAllowEntry);

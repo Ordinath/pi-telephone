@@ -8,7 +8,7 @@ export interface ReceivedMessage {
   answered: boolean;
   receivedAt: number;
 }
-interface Entry { type: string; customType?: string; data?: unknown }
+interface Entry { type: string; customType?: string; data?: unknown; details?: unknown; timestamp?: string }
 
 export function restoreState(entries: readonly Entry[]): TelephoneState {
   const data = entries.filter(entry => entry.type === 'custom' && entry.customType === 'telephone-state').at(-1)?.data;
@@ -20,6 +20,20 @@ export function restoreState(entries: readonly Entry[]): TelephoneState {
 
 export function recentMessages(messages: readonly ReceivedMessage[], now: number): ReceivedMessage[] {
   return messages.filter(message => message.receivedAt > now - 24 * 60 * 60 * 1000);
+}
+
+export function restoreInbox(entries: readonly Entry[], now: number): ReceivedMessage[] {
+  return recentMessages(entries.flatMap(entry => {
+    if (entry.type !== 'custom_message' || entry.customType !== 'telephone' || !entry.timestamp) return [];
+    const receivedAt = Date.parse(entry.timestamp);
+    const message = entry.details;
+    if (!Number.isFinite(receivedAt) || typeof message !== 'object' || message === null ||
+        !('id' in message) || typeof message.id !== 'string' ||
+        !('from' in message) || typeof message.from !== 'object' || message.from === null ||
+        !('address' in message.from) || typeof message.from.address !== 'string' ||
+        !('expectReply' in message) || typeof message.expectReply !== 'boolean') return [];
+    return [{ id: message.id, from: message.from.address, expectReply: message.expectReply, answered: false, receivedAt }];
+  }), now);
 }
 
 export function replyTarget(messages: readonly ReceivedMessage[], replyTo: string | undefined, now: number): string {

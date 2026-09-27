@@ -3,9 +3,10 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { Type } from 'typebox';
 import { TelephoneClient } from '../src/client.ts';
 import { renderInbound } from '../src/framing.ts';
+import { describeAllowEntry } from '../src/policy.ts';
 import { TelephoneError, VERSION, type InboundMessage, type SendResult } from '../src/protocol.ts';
 import {
-  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreState, timeoutMs,
+  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
   type ReceivedMessage, type TelephoneState,
 } from './helpers.ts';
 
@@ -111,7 +112,8 @@ export default function telephone(pi: ExtensionAPI) {
           await connection.update({ status: session.running ? 'busy' : 'idle' });
           return `Telephone on: ${session.address}`;
         } catch (error) {
-          if (!(error instanceof TelephoneError) || error.code !== 'name_taken' || candidate === candidates.at(-1)) throw error;
+          if (!(error instanceof TelephoneError) || error.code !== 'name_taken') throw error;
+          if (candidate === candidates.at(-1)) throw new Error(`The telephone name ${candidate} is already used by another live session on this machine.`);
         }
       }
       throw new Error('No telephone name available.');
@@ -158,7 +160,7 @@ export default function telephone(pi: ExtensionAPI) {
     await requireOn(session);
     if (add && !human) {
       if (!ctx.hasUI) throw new Error('Allow requires human confirmation. Ask the user to run /telephone allow <entry>.');
-      if (!await ctx.ui.confirm('Allow telephone callers?', `Add ${entry} to this session's telephone allowlist?`)) {
+      if (!await ctx.ui.confirm('Allow telephone callers?', `Add ${entry} to this session's telephone allowlist? ${describeAllowEntry(entry)}`)) {
         throw new Error('The user did not approve the change. Ask the user to run /telephone allow <entry>.');
       }
     }
@@ -189,12 +191,16 @@ export default function telephone(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => {
     const branch = ctx.sessionManager.getBranch();
     const session: Line = {
-      ctx, state: restoreState(branch), inbox: [], running: !ctx.isIdle(),
+      ctx, state: restoreState(branch), inbox: restoreInbox(branch, Date.now()), running: !ctx.isIdle(),
       asking: false, pending: Promise.resolve(), stopped: false,
     };
     current = session;
     ctx.ui.setStatus('telephone', undefined);
-    if (session.state.on) void turnOn(session).catch(error => { if (!session.stopped) notifyError(ctx, error); });
+    if (session.state.on) void turnOn(session).catch(error => {
+      if (session.stopped) return;
+      session.state = { ...session.state, on: false };
+      notifyError(ctx, error);
+    });
   });
 
   pi.on('session_shutdown', async () => {
@@ -203,8 +209,7 @@ export default function telephone(pi: ExtensionAPI) {
     session.closing ??= (async () => {
       session.stopped = true;
       await session.pending;
-      try { if (session.client && session.address) await session.client.unregister(); }
-      finally { await session.client?.close(); }
+      await session.client?.close();
     })();
     await session.closing;
   });
@@ -250,7 +255,7 @@ export default function telephone(pi: ExtensionAPI) {
         case 'reply': {
           const connection = await requireOn(session);
           const replyTo = replyTarget(session.inbox, params.replyTo, Date.now());
-          const result = await connection.send({ replyTo, text: required(params.message, 'message') });
+          const result = await connection.send({ to: session.inbox.find(message => message.id === replyTo)?.from, replyTo, text: required(params.message, 'message') });
           answered(session, replyTo);
           text = `Reply delivered to ${result.to} (message id ${result.id})`;
           break;
