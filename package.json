@@ -1,0 +1,27 @@
+{
+  "name": "pi-telephone",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./pi/index.ts"], "skills": ["./skills"] },
+  "bin": { "pi-telephone": "./dist/cli.mjs" },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.0.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.0.0"
+  }
+}

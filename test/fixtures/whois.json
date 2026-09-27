@@ -1,0 +1,7 @@
+{
+  "Node": {
+    "ID": 3003, "Name": "workbench.tailbbbb.ts.net.", "Key": "nodekey:fake-shared-key",
+    "User": 2002, "Addresses": ["100.84.206.101/32", "fd7a:115c:a1e0::101/128"]
+  },
+  "UserProfile": { "ID": 2002, "LoginName": "bob@example.com", "DisplayName": "Bob Example" }
+}

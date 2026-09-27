@@ -1,0 +1,26 @@
+{
+  "Version": "1.80.0",
+  "BackendState": "Running",
+  "TailscaleIPs": ["100.84.206.100", "fd7a:115c:a1e0::100"],
+  "Self": {
+    "ID": "n000000000001", "PublicKey": "nodekey:fake-self-key",
+    "HostName": "Alice Laptop", "DNSName": "alice-laptop.tailaaaa.ts.net.",
+    "UserID": 1001, "TailscaleIPs": ["100.84.206.100", "fd7a:115c:a1e0::100"], "Online": true
+  },
+  "Peer": {
+    "nodekey:fake-own-offline-key": {
+      "ID": "n000000000002", "PublicKey": "nodekey:fake-own-offline-key",
+      "HostName": "workbench", "DNSName": "workbench.tailaaaa.ts.net.",
+      "UserID": 1001, "TailscaleIPs": ["100.84.206.102", "fd7a:115c:a1e0::102"], "Online": false
+    },
+    "nodekey:fake-shared-key": {
+      "ID": "n000000000003", "PublicKey": "nodekey:fake-shared-key",
+      "HostName": "workbench", "DNSName": "workbench.tailbbbb.ts.net.",
+      "UserID": 2002, "TailscaleIPs": ["100.84.206.101", "fd7a:115c:a1e0::101"], "Online": true
+    }
+  },
+  "User": {
+    "1001": { "ID": 1001, "LoginName": "alice@example.com", "DisplayName": "Alice Example" },
+    "2002": { "ID": 2002, "LoginName": "bob@example.com", "DisplayName": "Bob Example" }
+  }
+}

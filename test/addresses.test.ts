@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { displayMachine, formatAddress, parseAddress, resolveMachine, slugify, validName, type Peer } from '../src/addresses.js';
+import { parseStatus } from '../src/identity.js';
+
+test('slugify, validate names and resolve addresses without offline short-label collisions', async () => {
+  assert.equal(slugify(' __My Project!__ '), 'my-project');
+  assert.equal(slugify('...---'), 'session');
+  assert.equal(slugify('A'.repeat(60)), 'a'.repeat(48));
+  assert.equal(slugify('Review.Code_1'), 'review.code_1');
+  for (const value of ['a', 'code-review_2.0', 'a'.repeat(48)]) assert.equal(validName(value), true);
+  for (const value of ['', 'Upper', '-name', 'a b', 'a@b', 'a'.repeat(49)]) assert.equal(validName(value), false);
+  assert.deepEqual(parseAddress('reviewer'), { session: 'reviewer', machine: undefined });
+  assert.deepEqual(parseAddress('reviewer@WORKBENCH.TAILBBBB.TS.NET.'), { session: 'reviewer', machine: 'workbench.tailbbbb.ts.net' });
+  assert.equal(formatAddress('reviewer', 'workbench'), 'reviewer@workbench');
+  assert.throws(() => parseAddress('bad@@host'), { code: 'invalid_address' });
+  const { self, peers } = parseStatus(JSON.parse(await readFile(new URL('./fixtures/status.json', import.meta.url), 'utf8')));
+  assert.equal(resolveMachine(undefined, self, peers), self);
+  assert.equal(resolveMachine('ALICE-LAPTOP', self, peers), self);
+  assert.equal(resolveMachine(`${self.fqdn}.`, self, peers), self);
+  assert.equal(resolveMachine('workbench', self, peers), peers[1]);
+  assert.equal(resolveMachine('workbench.tailaaaa.ts.net.', self, peers), peers[0]);
+  assert.equal(resolveMachine('100.84.206.101', self, peers), peers[1]);
+  const both: Peer[] = peers.map(peer => ({ ...peer, online: true }));
+  assert.throws(() => resolveMachine('workbench', self, both), error => error instanceof Error && /workbench.tailaaaa.ts.net.*workbench.tailbbbb.ts.net/.test(error.message));
+  both[1] = { ...both[1], hasExchange: true };
+  assert.equal(resolveMachine('workbench', self, both), both[1]);
+  assert.equal(displayMachine(peers[1], self, peers.map(peer => ({ ...peer, hasExchange: true }))), 'workbench');
+  assert.equal(displayMachine(both[1], self, both.map(peer => ({ ...peer, hasExchange: true }))), peers[1].fqdn);
+});
