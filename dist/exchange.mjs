@@ -73,7 +73,7 @@ import { isIP } from "node:net";
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var VERSION = false ? "0.1.0" : "0.1.0";
+var VERSION = false ? "0.1.0" : "0.1.1";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -147,6 +147,17 @@ function parseWhois(value) {
   return machine(value.Node.Name, value.Node.Addresses.map((address) => address.split("/")[0]), value.UserProfile);
 }
 var exec = promisify(execFile);
+var CLI_CANDIDATES = ["tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+async function firstWorkingCli(candidates = CLI_CANDIDATES) {
+  for (const executable of candidates) {
+    try {
+      const { stdout } = await exec(executable, ["status", "--json"], { timeout: 5e3, maxBuffer: 8 * 1024 * 1024 });
+      if (JSON.parse(stdout)?.Self) return executable;
+    } catch {
+    }
+  }
+  return void 0;
+}
 var TailscaleIdentityProvider = class {
   constructor(tailscaleCli = null) {
     this.tailscaleCli = tailscaleCli;
@@ -163,15 +174,10 @@ var TailscaleIdentityProvider = class {
   }
   async resolveCli() {
     if (this.tailscaleCli) return this.tailscaleCli;
-    for (const executable of ["tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]) {
-      try {
-        await exec(executable, ["version"], { timeout: 5e3 });
-        return executable;
-      } catch {
-      }
-    }
+    const executable = await firstWorkingCli();
+    if (executable) return executable;
     this.executable = void 0;
-    throw new Error("Tailscale CLI is unavailable");
+    throw new Error("No Tailscale CLI reported status");
   }
   async getStatus() {
     if (this.status && this.status.expires > Date.now()) return this.status.value;
@@ -551,11 +557,11 @@ function createExchange(options) {
     for (const send2 of pendingSends.values()) if (send2.sessionKey === session.key) send2.cancelled = true;
     connection.registration = void 0;
   }
-  function logNetworkState() {
+  function logNetworkState(reason) {
     const address2 = listening?.address ?? null;
     if (lastNetworkState === address2) return;
     lastNetworkState = address2;
-    void log(options.home, "info", address2 ? `Listening on ${address2}:${options.port}` : "Running local-only");
+    void log(options.home, "info", address2 ? `Listening on ${address2}:${options.port}` : `Running local-only${reason ? `: ${reason}` : ""}`);
   }
   async function refreshNetwork() {
     if (stopping) return;
@@ -585,11 +591,11 @@ function createExchange(options) {
       network = server;
       listening = { address: host, port: options.port };
       logNetworkState();
-    } catch {
+    } catch (error) {
       if (network) await closeServer(network);
       network = void 0;
       listening = null;
-      logNetworkState();
+      logNetworkState(error instanceof Error ? error.message : String(error));
     }
   }
   async function peers() {

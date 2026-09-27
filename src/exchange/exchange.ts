@@ -134,11 +134,11 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     for (const send of pendingSends.values()) if (send.sessionKey === session.key) send.cancelled = true;
     connection.registration = undefined;
   }
-  function logNetworkState(): void {
+  function logNetworkState(reason?: string): void {
     const address = listening?.address ?? null;
     if (lastNetworkState === address) return;
     lastNetworkState = address;
-    void log(options.home, 'info', address ? `Listening on ${address}:${options.port}` : 'Running local-only');
+    void log(options.home, 'info', address ? `Listening on ${address}:${options.port}` : `Running local-only${reason ? `: ${reason}` : ''}`);
   }
   async function refreshNetwork(): Promise<void> {
     if (stopping) return;
@@ -157,11 +157,11 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       network = server;
       listening = { address: host, port: options.port };
       logNetworkState();
-    } catch {
+    } catch (error) {
       if (network) await closeServer(network);
       network = undefined;
       listening = null;
-      logNetworkState();
+      logNetworkState(error instanceof Error ? error.message : String(error));
     }
   }
   async function peers(): Promise<Peer[]> {

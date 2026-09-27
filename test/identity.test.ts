@@ -1,7 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { parseStatus, parseWhois, TailscaleIdentityProvider } from '../src/identity.js';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { firstWorkingCli, parseStatus, parseWhois, TailscaleIdentityProvider } from '../src/identity.js';
+
+test('a CLI wrapper that exits 0 without status is skipped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'tel-cli-'));
+  try {
+    const wrapper = join(dir, 'wrapper'), real = join(dir, 'real');
+    await writeFile(wrapper, '#!/bin/sh\necho "The Tailscale GUI failed to start"\n');
+    await writeFile(real, '#!/bin/sh\necho \'{"Self": {}}\'\n');
+    await chmod(wrapper, 0o755);
+    await chmod(real, 0o755);
+    assert.equal(await firstWorkingCli([join(dir, 'missing'), wrapper, real]), real);
+    assert.equal(await firstWorkingCli([wrapper]), undefined);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
 
 test('parseStatus skips incomplete peers but not incomplete self', async () => {
   const status = JSON.parse(await readFile(new URL('./fixtures/status.json', import.meta.url), 'utf8'));

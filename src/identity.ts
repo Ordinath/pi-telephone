@@ -35,6 +35,17 @@ export function parseWhois(value: WhoisJson): MachineIdentity {
   return machine(value.Node.Name, value.Node.Addresses.map(address => address.split('/')[0]), value.UserProfile);
 }
 const exec = promisify(execFile);
+const CLI_CANDIDATES = ['tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale'];
+// The macOS app's CLI wrapper answers every command, `version` included, with a GUI error outside a login session, so a candidate must produce real status.
+export async function firstWorkingCli(candidates: string[] = CLI_CANDIDATES): Promise<string | undefined> {
+  for (const executable of candidates) {
+    try {
+      const { stdout } = await exec(executable, ['status', '--json'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
+      if (JSON.parse(stdout)?.Self) return executable;
+    } catch { /* Try the next supported installation. */ }
+  }
+  return undefined;
+}
 export class TailscaleIdentityProvider implements IdentityProvider {
   private executable?: Promise<string>;
   private status?: { expires: number; value: ReturnType<typeof parseStatus> };
@@ -49,12 +60,10 @@ export class TailscaleIdentityProvider implements IdentityProvider {
   }
   private async resolveCli(): Promise<string> {
     if (this.tailscaleCli) return this.tailscaleCli;
-    for (const executable of ['tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale', '/Applications/Tailscale.app/Contents/MacOS/Tailscale']) {
-      try { await exec(executable, ['version'], { timeout: 5000 }); return executable; }
-      catch { /* Try the next supported installation. */ }
-    }
+    const executable = await firstWorkingCli();
+    if (executable) return executable;
     this.executable = undefined;
-    throw new Error('Tailscale CLI is unavailable');
+    throw new Error('No Tailscale CLI reported status');
   }
   private async getStatus(): Promise<ReturnType<typeof parseStatus>> {
     if (this.status && this.status.expires > Date.now()) return this.status.value;
