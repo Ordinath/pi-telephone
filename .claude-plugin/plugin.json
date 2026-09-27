@@ -5,6 +5,9 @@
   "author": {
     "name": "Nikita Sklyarov"
   },
+  "homepage": "https://github.com/Ordinath/pi-telephone",
+  "repository": "https://github.com/Ordinath/pi-telephone",
+  "license": "MIT",
   "mcpServers": {
     "telephone": {
       "alwaysLoad": true,

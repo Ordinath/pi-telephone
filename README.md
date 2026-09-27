@@ -29,15 +29,14 @@ Pi:
 pi install npm:pi-telephone
 ```
 
-Claude Code (the package is also a local plugin marketplace):
+Claude Code:
 
 ```sh
-npm install -g pi-telephone
-claude plugin marketplace add "$(npm root -g)/pi-telephone"
+claude plugin marketplace add Ordinath/pi-telephone
 claude plugin install telephone@pi-telephone
 ```
 
-The global install also puts the `pi-telephone` command on your PATH; `npm update -g pi-telephone` updates the plugin in place.
+The command-line tool for status and trust comes with the npm package: `npx pi-telephone status`.
 
 ## Use
 

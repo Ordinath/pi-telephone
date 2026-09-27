@@ -4,6 +4,14 @@
   "description": "Agent sessions call each other across machines on your Tailscale network, in Pi and Claude Code.",
   "license": "MIT",
   "author": "Nikita Sklyarov",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ordinath/pi-telephone.git"
+  },
+  "homepage": "https://github.com/Ordinath/pi-telephone#readme",
+  "bugs": {
+    "url": "https://github.com/Ordinath/pi-telephone/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20"
