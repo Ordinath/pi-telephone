@@ -1,0 +1,16 @@
+{
+  "name": "telephone",
+  "version": "0.1.0",
+  "description": "Call and message other agent sessions across your private tailnet.",
+  "author": {
+    "name": "Nikita Sklyarov"
+  },
+  "mcpServers": {
+    "telephone": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/claude-mcp.mjs"
+      ]
+    }
+  }
+}

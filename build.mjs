@@ -5,6 +5,7 @@ const { version } = JSON.parse(await readFile(new URL('./package.json', import.m
 const entries = [
   ['src/exchange/main.ts', 'dist/exchange.mjs'],
   ['src/cli.ts', 'dist/cli.mjs'],
+  ['claude/server.ts', 'dist/claude-mcp.mjs'],
 ];
 for (const [entry, outfile] of entries) {
   await build({
