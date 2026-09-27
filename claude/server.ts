@@ -24,7 +24,7 @@ let asking = false;
 
 async function deliver(message: InboundMessage): Promise<{ accepted: boolean; reason?: string }> {
   if (!inbox) return { accepted: false, reason: noInbox };
-  const text = renderInbound(message, { ownerLogin, replyHint: 'Reply with the telephone tool: action "reply".' });
+  const text = renderInbound(message, { ownerLogin, replyHint: 'Reply with the telephone tool (mcp__plugin_telephone_telephone__telephone), action "reply".' });
   try {
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(inbox);
@@ -91,6 +91,7 @@ async function confirm(message: string, command: string, signal: AbortSignal): P
   throw new Error(`The user did not approve the change. Ask the user to run ${command} in a Claude Code session with elicitation support.`);
 }
 server.registerTool('telephone', {
+  _meta: { 'anthropic/alwaysLoad': true },
   description: 'Call other agents, never the user. Addresses are session@machine, or bare session for this machine. ask blocks for a reply; send does not. Inbound telephone messages arrive in the conversation; answer with reply.',
   inputSchema: {
     action: z.enum(['status', 'on', 'off', 'list', 'send', 'ask', 'reply', 'allow', 'revoke', 'trust', 'untrust']),
@@ -134,7 +135,7 @@ server.registerTool('telephone', {
         requireOn();
         const sent = await client.send({ to: required(args.to, 'to'), text: required(args.message, 'message') });
         inbound = markAnswered(inbound, sent.inferredReplyTo);
-        text = JSON.stringify(sent);
+        text = `Delivered to ${sent.to} (message id ${sent.id})${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
         break;
       }
       case 'ask': {
@@ -165,7 +166,7 @@ server.registerTool('telephone', {
         const target = replyTarget(inbound, args.replyTo);
         const sent = await client.send({ replyTo: target.id, text: required(args.message, 'message') });
         inbound = markAnswered(inbound, target.id);
-        text = JSON.stringify(sent);
+        text = `Reply delivered to ${sent.to} (message id ${sent.id})`;
         break;
       }
       case 'allow':
@@ -204,8 +205,7 @@ process.once('SIGINT', () => { void close(); });
 process.once('SIGTERM', () => { void close(); });
 process.stdin.once('end', () => { void close(); });
 server.server.onclose = () => { void close(); };
-if (process.env.PI_TELEPHONE_NAME !== undefined) {
-  try { await turnOn(process.env.PI_TELEPHONE_NAME); }
-  catch (error) { console.error(error instanceof Error ? error.message : String(error)); }
-}
 await server.connect(new StdioServerTransport());
+if (process.env.PI_TELEPHONE_NAME !== undefined) {
+  void turnOn(process.env.PI_TELEPHONE_NAME).catch(error => console.error(error instanceof Error ? error.message : String(error)));
+}

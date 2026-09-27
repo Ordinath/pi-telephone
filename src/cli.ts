@@ -19,12 +19,13 @@ else if (!['status', 'list', 'trust', 'untrust', 'stop'].includes(command) || ([
         console.log(`Listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : 'local only'}`);
         console.log(`Owner: ${owner || 'Tailscale unavailable'}`);
         console.log(`Trusted users: ${config.trustedUsers.join(', ') || 'none (owner is always trusted)'}`);
-        console.table(entries.filter(entry => entry.local));
+        const local = entries.filter(entry => entry.local);
+        if (local.length) console.table(local); else console.log('No sessions.');
         break;
       }
       case 'list': {
         const { entries, warnings } = await client.directory();
-        console.table(entries);
+        if (entries.length) console.table(entries); else console.log('No sessions.');
         for (const warning of warnings) console.error(warning);
         break;
       }

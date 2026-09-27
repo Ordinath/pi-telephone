@@ -27,7 +27,7 @@ export function isTrusted(login: string, owner: string, trustedUsers: string[]):
   const value = login.toLowerCase();
   return !!value && (value === owner.toLowerCase() || trustedUsers.some(user => user.toLowerCase() === value));
 }
-export function allows(allow: string[], caller: Caller, owner: string): boolean {
+export function allows(allow: string[], caller: Caller, owner: string, selfFqdn: string): boolean {
   return allow.some(value => {
     const entry = parseAllowEntry(value);
     switch (entry.kind) {
@@ -36,7 +36,9 @@ export function allows(allow: string[], caller: Caller, owner: string): boolean 
       case 'any': return true;
       case 'user': return caller.machine.login.toLowerCase() === entry.login;
       case 'address': return (entry.session === '*' || entry.session === caller.session) &&
-        (entry.machine === '*' || entry.machine === normalizeMachine(caller.machine.fqdn) || entry.machine === caller.machine.short.toLowerCase());
+        (entry.machine === '*' || entry.machine === normalizeMachine(caller.machine.fqdn) ||
+          (entry.machine === caller.machine.short.toLowerCase() &&
+            normalizeMachine(caller.machine.fqdn).split('.').slice(1).join('.') === normalizeMachine(selfFqdn).split('.').slice(1).join('.')));
     }
   });
 }

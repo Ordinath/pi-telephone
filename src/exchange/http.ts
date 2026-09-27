@@ -3,23 +3,39 @@ import { TelephoneError } from '../protocol.js';
 
 export interface HttpInput { method: string; url: URL; sourceIP: string; fromPort?: number; body: unknown }
 export interface HttpOutput { status?: number; body: unknown }
+const peerErrors: Record<string, string> = {
+  not_trusted: 'Peer does not trust this machine', not_reachable: 'Recipient is not reachable',
+  busy_waiting: 'The recipient is waiting for your reply to one of its calls; answer it with a reply instead of asking.',
+  too_large: 'Message is too large', rate_limited: 'Peer rate limit exceeded', delivery_failed: 'Recipient did not accept the message',
+  invalid_id: 'Invalid message id', invalid_request: 'Invalid request', proto_mismatch: 'Incompatible telephone protocol',
+  forbidden: 'Peer refused the request',
+};
 const errorStatus: Record<string, number> = {
   forbidden: 403, not_trusted: 403, not_reachable: 404, busy_waiting: 409,
   too_large: 413, rate_limited: 429, delivery_failed: 502, invalid_id: 400, proto_mismatch: 400, invalid_request: 400,
 };
 export function normalizedIP(ip: string): string { return ip.replace(/^::ffff:/, ''); }
-export function networkServer(maxBytes: number, handle: (input: HttpInput) => Promise<HttpOutput>): Server {
+export function networkServer<T>(maxBytes: number, authenticate: (input: HttpInput) => Promise<T>, handle: (input: HttpInput, identity: T) => Promise<HttpOutput>): Server {
   const server = createServer((req, res) => {
     const timer = setTimeout(() => { req.destroy(); res.destroy(); }, 10000);
     res.on('close', () => clearTimeout(timer));
-    void serve(req, res, maxBytes, handle);
+    void serve(req, res, maxBytes, authenticate, handle);
   });
+  server.maxConnections = 64;
   server.requestTimeout = 10000;
   server.headersTimeout = 10000;
   return server;
 }
-async function serve(req: IncomingMessage, res: ServerResponse, maxBytes: number, handle: (input: HttpInput) => Promise<HttpOutput>): Promise<void> {
+async function serve<T>(req: IncomingMessage, res: ServerResponse, maxBytes: number, authenticate: (input: HttpInput) => Promise<T>, handle: (input: HttpInput, identity: T) => Promise<HttpOutput>): Promise<void> {
   try {
+    const header = req.headers['x-telephone-from-port'];
+    const port = typeof header === 'string' ? Number(header) : undefined;
+    const input: HttpInput = {
+      method: req.method ?? '', url: new URL(req.url ?? '/', 'http://exchange'),
+      sourceIP: normalizedIP(req.socket.remoteAddress ?? ''),
+      fromPort: port && Number.isInteger(port) && port <= 65535 ? port : undefined, body: undefined,
+    };
+    const identity = await authenticate(input);
     let size = 0;
     const chunks: Buffer[] = [];
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
@@ -32,13 +48,7 @@ async function serve(req: IncomingMessage, res: ServerResponse, maxBytes: number
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { throw new TelephoneError('invalid_request'); }
     }
-    const header = req.headers['x-telephone-from-port'];
-    const port = typeof header === 'string' ? Number(header) : undefined;
-    const result = await handle({
-      method: req.method ?? '', url: new URL(req.url ?? '/', 'http://exchange'),
-      sourceIP: normalizedIP(req.socket.remoteAddress ?? ''),
-      fromPort: port && Number.isInteger(port) && port <= 65535 ? port : undefined, body,
-    });
+    const result = await handle({ ...input, body }, identity);
     res.writeHead(result.status ?? 200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(result.body));
   } catch (error) {
@@ -71,7 +81,10 @@ export function peerRequest<T>(options: {
         clearTimeout(timer);
         try {
           const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (res.statusCode !== 200) reject(new TelephoneError(typeof value.error === 'string' ? value.error : 'unreachable', value.message));
+          if (res.statusCode !== 200) {
+            const code = typeof value?.error === 'string' && Object.hasOwn(peerErrors, value.error) ? value.error : 'unreachable';
+            reject(new TelephoneError(code, peerErrors[code] ?? 'Peer request failed'));
+          }
           else resolve(value);
         } catch { reject(new TelephoneError('unreachable', 'Invalid peer response')); }
       });

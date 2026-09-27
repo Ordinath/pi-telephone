@@ -22,15 +22,6 @@ export function recentMessages(messages: readonly ReceivedMessage[], now: number
   return messages.filter(message => message.receivedAt > now - 24 * 60 * 60 * 1000);
 }
 
-export function restoreInbox(entries: readonly Entry[], now: number): ReceivedMessage[] {
-  const data = entries.filter(entry => entry.type === 'custom' && entry.customType === 'telephone-inbox').at(-1)?.data;
-  if (!Array.isArray(data)) return [];
-  return recentMessages(data.filter((message): message is ReceivedMessage =>
-    typeof message === 'object' && message !== null && typeof message.id === 'string'
-    && typeof message.from === 'string' && typeof message.expectReply === 'boolean'
-    && typeof message.answered === 'boolean' && typeof message.receivedAt === 'number'), now);
-}
-
 export function replyTarget(messages: readonly ReceivedMessage[], replyTo: string | undefined, now: number): string {
   if (replyTo !== undefined) return replyTo;
   const recent = recentMessages(messages, now);

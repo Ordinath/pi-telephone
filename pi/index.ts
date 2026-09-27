@@ -5,7 +5,7 @@ import { TelephoneClient } from '../src/client.ts';
 import { renderInbound } from '../src/framing.ts';
 import { TelephoneError, VERSION, type InboundMessage, type SendResult } from '../src/protocol.ts';
 import {
-  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
+  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreState, timeoutMs,
   type ReceivedMessage, type TelephoneState,
 } from './helpers.ts';
 
@@ -51,7 +51,6 @@ export default function telephone(pi: ExtensionAPI) {
 
   function saveInbox(session: Line): void {
     session.inbox = recentMessages(session.inbox, Date.now());
-    if (!session.stopped) pi.appendEntry('telephone-inbox', session.inbox.map(message => ({ ...message })));
   }
 
   function remember(session: Line, message: InboundMessage): void {
@@ -190,7 +189,7 @@ export default function telephone(pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => {
     const branch = ctx.sessionManager.getBranch();
     const session: Line = {
-      ctx, state: restoreState(branch), inbox: restoreInbox(branch, Date.now()), running: !ctx.isIdle(),
+      ctx, state: restoreState(branch), inbox: [], running: !ctx.isIdle(),
       asking: false, pending: Promise.resolve(), stopped: false,
     };
     current = session;
@@ -231,7 +230,11 @@ export default function telephone(pi: ExtensionAPI) {
         case 'on': text = await turnOn(session, params.name); break;
         case 'off': text = await turnOff(session); break;
         case 'list': text = await list(session); break;
-        case 'send': text = JSON.stringify(await send(session, required(params.to, 'to'), required(params.message, 'message'))); break;
+        case 'send': {
+          const sent = await send(session, required(params.to, 'to'), required(params.message, 'message'));
+          text = `Delivered to ${sent.to} (message id ${sent.id})${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
+          break;
+        }
         case 'ask': {
           const connection = await requireOn(session);
           if (session.asking) throw new Error('Only one telephone ask may be active at a time.');
@@ -249,7 +252,7 @@ export default function telephone(pi: ExtensionAPI) {
           const replyTo = replyTarget(session.inbox, params.replyTo, Date.now());
           const result = await connection.send({ replyTo, text: required(params.message, 'message') });
           answered(session, replyTo);
-          text = JSON.stringify(result);
+          text = `Reply delivered to ${result.to} (message id ${result.id})`;
           break;
         }
         case 'allow': case 'revoke':
@@ -285,7 +288,7 @@ export default function telephone(pi: ExtensionAPI) {
             required(arg, 'address'); required(message, 'message');
             if (!session.state.on || !session.address) await turnOn(session);
             const sent = await send(session, arg, message);
-            result = JSON.stringify(sent);
+            result = `Delivered to ${sent.to} (message id ${sent.id})${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
             info(`User sent a telephone message to ${sent.to}:\n\n${message}`);
             break;
           }

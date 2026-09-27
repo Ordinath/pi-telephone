@@ -172,9 +172,10 @@ export class TelephoneClient extends EventEmitter {
     if (input.signal?.aborted) throw new TelephoneError('aborted');
     const id = randomUUID();
     let cancel: (error: Error) => void = () => {};
+    let received: InboundMessage | undefined;
     const reply = new Promise<InboundMessage>((resolve, reject) => {
       cancel = reject;
-      this.replies.set(id, { resolve, reject });
+      this.replies.set(id, { resolve: message => { received = message; resolve(message); }, reject });
     });
     const onAbort = () => cancel(new TelephoneError('aborted'));
     input.signal?.addEventListener('abort', onAbort, { once: true });
@@ -184,6 +185,7 @@ export class TelephoneClient extends EventEmitter {
       const [sendResult, replyResult] = await Promise.all([sent, reply]);
       return { sent: sendResult, reply: replyResult };
     } catch (error) {
+      if (received) return { sent: { id, status: 'delivered', to: input.to }, reply: received };
       if (this.socket && !this.socket.destroyed) void this.request({ t: 'cancelWait', id }).catch(() => {});
       throw error;
     } finally {

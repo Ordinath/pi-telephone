@@ -1,5 +1,7 @@
 // src/exchange/main.ts
-import { open, readFile as readFile2, stat, unlink as unlink2 } from "node:fs/promises";
+import { open, readFile as readFile3, rename as rename2, stat, unlink as unlink2 } from "node:fs/promises";
+import { createConnection } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 
 // src/config.ts
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -153,6 +155,7 @@ var TailscaleIdentityProvider = class {
   status;
   pendingStatus;
   identities = /* @__PURE__ */ new Map();
+  pendingWhois = /* @__PURE__ */ new Map();
   async command(args) {
     this.executable ??= this.resolveCli();
     const { stdout } = await exec(await this.executable, args, { timeout: 5e3, maxBuffer: 8 * 1024 * 1024 });
@@ -190,14 +193,23 @@ var TailscaleIdentityProvider = class {
   async whois(ip) {
     const cached = this.identities.get(ip);
     if (cached && cached.expires > Date.now()) return cached.value;
-    let value;
-    try {
-      value = parseWhois(JSON.parse(await this.command(["whois", "--json", ip])));
-    } catch {
-      value = void 0;
+    let pending = this.pendingWhois.get(ip);
+    if (!pending) {
+      pending = (async () => {
+        let value;
+        try {
+          value = parseWhois(JSON.parse(await this.command(["whois", "--json", ip])));
+        } catch {
+          value = void 0;
+        }
+        this.identities.set(ip, { expires: Date.now() + (value ? 3e5 : 3e4), value });
+        return value;
+      })().finally(() => {
+        this.pendingWhois.delete(ip);
+      });
+      this.pendingWhois.set(ip, pending);
     }
-    this.identities.set(ip, { expires: Date.now() + (value ? 3e5 : 3e4), value });
-    return value;
+    return pending;
   }
   isTailnetAddress(ip) {
     if (isIP2(ip) === 4) {
@@ -209,7 +221,7 @@ var TailscaleIdentityProvider = class {
 };
 
 // src/exchange/exchange.ts
-import { chmod as chmod2, unlink } from "node:fs/promises";
+import { chmod as chmod2, readFile as readFile2, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { createServer as createServer2 } from "node:net";
 
@@ -265,7 +277,7 @@ function isTrusted(login, owner, trustedUsers) {
   const value = login.toLowerCase();
   return !!value && (value === owner.toLowerCase() || trustedUsers.some((user) => user.toLowerCase() === value));
 }
-function allows(allow, caller, owner) {
+function allows(allow, caller, owner, selfFqdn) {
   return allow.some((value) => {
     const entry = parseAllowEntry(value);
     switch (entry.kind) {
@@ -278,13 +290,25 @@ function allows(allow, caller, owner) {
       case "user":
         return caller.machine.login.toLowerCase() === entry.login;
       case "address":
-        return (entry.session === "*" || entry.session === caller.session) && (entry.machine === "*" || entry.machine === normalizeMachine(caller.machine.fqdn) || entry.machine === caller.machine.short.toLowerCase());
+        return (entry.session === "*" || entry.session === caller.session) && (entry.machine === "*" || entry.machine === normalizeMachine(caller.machine.fqdn) || entry.machine === caller.machine.short.toLowerCase() && normalizeMachine(caller.machine.fqdn).split(".").slice(1).join(".") === normalizeMachine(selfFqdn).split(".").slice(1).join("."));
     }
   });
 }
 
 // src/exchange/http.ts
 import { createServer, request } from "node:http";
+var peerErrors = {
+  not_trusted: "Peer does not trust this machine",
+  not_reachable: "Recipient is not reachable",
+  busy_waiting: "The recipient is waiting for your reply to one of its calls; answer it with a reply instead of asking.",
+  too_large: "Message is too large",
+  rate_limited: "Peer rate limit exceeded",
+  delivery_failed: "Recipient did not accept the message",
+  invalid_id: "Invalid message id",
+  invalid_request: "Invalid request",
+  proto_mismatch: "Incompatible telephone protocol",
+  forbidden: "Peer refused the request"
+};
 var errorStatus = {
   forbidden: 403,
   not_trusted: 403,
@@ -300,21 +324,32 @@ var errorStatus = {
 function normalizedIP(ip) {
   return ip.replace(/^::ffff:/, "");
 }
-function networkServer(maxBytes, handle) {
+function networkServer(maxBytes, authenticate, handle) {
   const server = createServer((req, res) => {
     const timer = setTimeout(() => {
       req.destroy();
       res.destroy();
     }, 1e4);
     res.on("close", () => clearTimeout(timer));
-    void serve(req, res, maxBytes, handle);
+    void serve(req, res, maxBytes, authenticate, handle);
   });
+  server.maxConnections = 64;
   server.requestTimeout = 1e4;
   server.headersTimeout = 1e4;
   return server;
 }
-async function serve(req, res, maxBytes, handle) {
+async function serve(req, res, maxBytes, authenticate, handle) {
   try {
+    const header = req.headers["x-telephone-from-port"];
+    const port = typeof header === "string" ? Number(header) : void 0;
+    const input = {
+      method: req.method ?? "",
+      url: new URL(req.url ?? "/", "http://exchange"),
+      sourceIP: normalizedIP(req.socket.remoteAddress ?? ""),
+      fromPort: port && Number.isInteger(port) && port <= 65535 ? port : void 0,
+      body: void 0
+    };
+    const identity = await authenticate(input);
     let size = 0;
     const chunks = [];
     for await (const chunk of req.iterator({ destroyOnReturn: false })) {
@@ -330,15 +365,7 @@ async function serve(req, res, maxBytes, handle) {
         throw new TelephoneError("invalid_request");
       }
     }
-    const header = req.headers["x-telephone-from-port"];
-    const port = typeof header === "string" ? Number(header) : void 0;
-    const result = await handle({
-      method: req.method ?? "",
-      url: new URL(req.url ?? "/", "http://exchange"),
-      sourceIP: normalizedIP(req.socket.remoteAddress ?? ""),
-      fromPort: port && Number.isInteger(port) && port <= 65535 ? port : void 0,
-      body
-    });
+    const result = await handle({ ...input, body }, identity);
     res.writeHead(result.status ?? 200, { "content-type": "application/json" });
     res.end(JSON.stringify(result.body));
   } catch (error) {
@@ -375,8 +402,10 @@ function peerRequest(options) {
         clearTimeout(timer);
         try {
           const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          if (res.statusCode !== 200) reject(new TelephoneError(typeof value.error === "string" ? value.error : "unreachable", value.message));
-          else resolve2(value);
+          if (res.statusCode !== 200) {
+            const code = typeof value?.error === "string" && Object.hasOwn(peerErrors, value.error) ? value.error : "unreachable";
+            reject(new TelephoneError(code, peerErrors[code] ?? "Peer request failed"));
+          } else resolve2(value);
         } catch {
           reject(new TelephoneError("unreachable", "Invalid peer response"));
         }
@@ -438,6 +467,10 @@ function createExchange(options) {
   const pairRates = /* @__PURE__ */ new Map();
   const targetRates = /* @__PURE__ */ new Map();
   const local = createServer2((socket) => {
+    if (stopping) {
+      socket.destroy();
+      return;
+    }
     const connection = { socket, hello: false };
     connections.add(connection);
     clearTimeout(idleTimer);
@@ -494,6 +527,7 @@ function createExchange(options) {
       }
     }
     while (ledger.size > 1e4) ledger.delete(ledger.keys().next().value);
+    while (inbound.size > 1e4) inbound.delete(inbound.keys().next().value);
   }
   function sameRoute(a, b) {
     return a.session === b.session && a.local === b.local && a.machine.fqdn.toLowerCase() === b.machine.fqdn.toLowerCase();
@@ -541,7 +575,7 @@ function createExchange(options) {
         logNetworkState();
         return;
       }
-      const server = networkServer(config.maxMessageBytes + 16384, handleNetwork);
+      const server = networkServer(config.maxMessageBytes + 16384, authenticateNetwork, handleNetwork);
       try {
         await listen(server, host, options.port);
       } catch (error) {
@@ -601,7 +635,7 @@ function createExchange(options) {
     const warnings = [];
     for (const target of names.values()) {
       const registration = registered(target);
-      if (!allows(registration.allow, caller, self.login)) continue;
+      if (!allows(registration.allow, caller, self.login, self.fqdn)) continue;
       const machine2 = displayMachine(self, self, all);
       entries.push({
         address: formatAddress(registration.session.name, machine2),
@@ -626,7 +660,21 @@ function createExchange(options) {
         const endpoint = peerEndpoints.get(peer.fqdn);
         const result = await remote(endpoint?.ip ?? ipv4(peer), endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ""}`, 3e3);
         const machine2 = displayMachine(peer, self, all);
-        for (const session of result.sessions) entries.push({ ...session, address: formatAddress(session.session, machine2), machine: machine2, fqdn: peer.fqdn, local: false, self: false });
+        if (!Array.isArray(result.sessions)) throw new TelephoneError("unreachable", "Invalid peer directory");
+        for (const session of result.sessions) {
+          if (!isObject(session) || !validName(session.session) || !validHarness(session.harness) || session.status !== "idle" && session.status !== "busy") continue;
+          entries.push({
+            session: session.session,
+            harness: session.harness,
+            status: session.status,
+            ...typeof session.cwd === "string" && session.cwd.length <= 1024 ? { cwd: session.cwd } : {},
+            address: formatAddress(session.session, machine2),
+            machine: machine2,
+            fqdn: peer.fqdn,
+            local: false,
+            self: false
+          });
+        }
       } catch (error) {
         const reason = error instanceof TelephoneError ? error.code : "unreachable";
         if (reason === "not_trusted") discovery.set(peer.fqdn, { at: now(), hasExchange: true, reason });
@@ -668,9 +716,9 @@ function createExchange(options) {
     let replyTo = request2.replyTo;
     let inferredReplyTo;
     if (!replyTo) {
-      const candidates = [...inbound.values()].filter((entry) => entry.targetKey === sender.session.key && entry.message.expectReply && !entry.answered && sameRoute(route, entry.route));
+      const candidates = [...inbound.values()].filter((entry) => entry.targetKey === sender.session.key && entry.expectReply && !entry.answered && sameRoute(route, entry.route));
       if (candidates.length === 1) {
-        replyTo = candidates[0].message.id;
+        replyTo = candidates[0].id;
         inferredReplyTo = replyTo;
         route = candidates[0].route;
       }
@@ -715,7 +763,7 @@ function createExchange(options) {
     const previous = body.replyTo ? ledger.get(body.replyTo) : void 0;
     const isReply = !!(registration && previous && previous.fromSessionKey === registration.session.key && sameRoute(previous.to, route));
     if (!isReply && !localCaller && !isTrusted(machine2.login, self.login, config.trustedUsers)) throw new TelephoneError("not_trusted");
-    if (!target || !registration || !isReply && !allows(registration.allow, { session: body.from.session, machine: machine2, local: localCaller }, self.login)) throw new TelephoneError("not_reachable");
+    if (!target || !registration || !isReply && !allows(registration.allow, { session: body.from.session, machine: machine2, local: localCaller }, self.login, self.fqdn)) throw new TelephoneError("not_reachable");
     if (Buffer.byteLength(body.text) > config.maxMessageBytes) throw new TelephoneError("too_large");
     if (inbound.has(body.id) || acks.has(body.id) || !localCaller && ledger.has(body.id)) throw new TelephoneError("invalid_id");
     const pair = `${machine2.fqdn}\0${body.from.session}\0${registration.session.key}`;
@@ -750,7 +798,8 @@ function createExchange(options) {
       isReplyToOwnCall: isReply,
       sentAt: body.sentAt
     };
-    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, message, answered: false });
+    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, id: body.id, expectReply: body.expectReply, answered: false });
+    prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine2.fqdn, { ip: sourceIP, port: body.fromPort });
     const accepted = await new Promise((resolve3) => {
       const timer = setTimeout(() => finish(false), 5e3);
@@ -772,14 +821,15 @@ function createExchange(options) {
     }
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
-  async function handleNetwork(input) {
+  async function authenticateNetwork(input) {
     if (!options.identity.isTailnetAddress(input.sourceIP) || self.ips.includes(input.sourceIP)) throw new TelephoneError("forbidden");
-    const isDelivery = input.method === "POST" && input.url.pathname === "/v1/deliver";
-    const fromPort = isDelivery && isObject(input.body) && typeof input.body.fromPort === "number" ? input.body.fromPort : input.fromPort;
-    const machine2 = await options.identity.whois(input.sourceIP, { fromPort });
+    const machine2 = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine2) throw new TelephoneError("forbidden");
     discovery.set(machine2.fqdn, { at: now(), hasExchange: true });
-    const body = isDelivery ? validateDelivery(input.body) : void 0;
+    return machine2;
+  }
+  async function handleNetwork(input, machine2) {
+    const body = input.method === "POST" && input.url.pathname === "/v1/deliver" ? validateDelivery(input.body) : void 0;
     if (input.method === "GET" && input.url.pathname === "/v1/hello") return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
     if (body) {
       await deliver(body, machine2, false, input.sourceIP);
@@ -792,7 +842,7 @@ function createExchange(options) {
       const caller = { session, machine: machine2, local: false };
       return { body: { sessions: [...names.values()].flatMap((connection) => {
         const registration = registered(connection);
-        if (!allows(registration.allow, caller, self.login)) return [];
+        if (!allows(registration.allow, caller, self.login, self.fqdn)) return [];
         return [{
           session: registration.session.name,
           harness: registration.session.harness,
@@ -911,11 +961,12 @@ function createExchange(options) {
     stopping ??= (async () => {
       clearInterval(retryTimer);
       clearTimeout(idleTimer);
+      const closed = new Promise((resolve3) => local.close(() => resolve3()));
       for (const connection of connections) connection.socket.destroy();
       await networkRefresh;
       if (network) await closeServer(network);
-      await new Promise((resolve3) => local.close(() => resolve3()));
-      if (ownsSocket) await unlink(p2.socket).catch(() => {
+      await closed;
+      if (ownsSocket && await readFile2(p2.lock, "utf8").catch(() => "") === String(process.pid)) await unlink(p2.socket).catch(() => {
       });
       await configWrites;
     })();
@@ -949,8 +1000,59 @@ function validateDelivery(value) {
 // src/exchange/main.ts
 var p = paths();
 await prepareHome(p.home);
+var claim = `${p.lock}.claim`;
+async function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !isFsError(error, "ESRCH");
+  }
+}
+async function socketAccepts() {
+  return new Promise((resolve2) => {
+    const socket = createConnection(p.socket);
+    socket.setTimeout(250);
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve2(true);
+    });
+    socket.once("error", () => {
+      socket.destroy();
+      resolve2(false);
+    });
+    socket.once("timeout", () => {
+      socket.destroy();
+      resolve2(false);
+    });
+  });
+}
+async function releaseClaim() {
+  if (await readFile3(claim, "utf8").catch(() => "") === String(process.pid)) await unlink2(claim).catch(() => {
+  });
+}
 async function acquireLock() {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      const file = await open(claim, "wx", 384);
+      try {
+        await file.writeFile(String(process.pid));
+      } finally {
+        await file.close();
+      }
+      break;
+    } catch (error) {
+      if (!isFsError(error, "EEXIST")) throw error;
+      const owner = Number(await readFile3(claim, "utf8").catch(() => ""));
+      const age = await stat(claim).then((info) => Date.now() - info.mtimeMs).catch(() => 0);
+      if (owner && !await pidAlive(owner) || age > 15e3) await unlink2(claim).catch(() => {
+      });
+      await sleep(50);
+      if (attempt === 99) return false;
+    }
+  }
+  try {
     try {
       const file = await open(p.lock, "wx", 384);
       try {
@@ -958,29 +1060,34 @@ async function acquireLock() {
       } finally {
         await file.close();
       }
-      return true;
     } catch (error) {
       if (!isFsError(error, "EEXIST")) throw error;
-      let pid;
+      const pid = Number(await readFile3(p.lock, "utf8").catch(() => ""));
+      if (await pidAlive(pid) && await socketAccepts()) {
+        await releaseClaim();
+        return false;
+      }
+      const temp = `${p.lock}.${process.pid}.tmp`;
+      const file = await open(temp, "wx", 384);
       try {
-        pid = Number(await readFile2(p.lock, "utf8"));
-        if (!Number.isInteger(pid) || pid <= 0) {
-          if (Date.now() - (await stat(p.lock)).mtimeMs < 5e3) return false;
-        } else {
-          try {
-            process.kill(pid, 0);
-            return false;
-          } catch (error2) {
-            if (!isFsError(error2, "ESRCH")) return false;
-          }
-        }
-        await unlink2(p.lock);
-      } catch (error2) {
-        if (!isFsError(error2, "ENOENT")) throw error2;
+        await file.writeFile(String(process.pid));
+      } finally {
+        await file.close();
+      }
+      try {
+        await rename2(temp, p.lock);
+      } finally {
+        await unlink2(temp).catch(() => {
+        });
       }
     }
+    if (await readFile3(p.lock, "utf8") === String(process.pid)) return true;
+    await releaseClaim();
+    return false;
+  } catch (error) {
+    await releaseClaim();
+    throw error;
   }
-  return false;
 }
 if (!await acquireLock()) process.exit(0);
 var exchange;
@@ -988,12 +1095,13 @@ var cleanupPromise;
 function cleanup() {
   cleanupPromise ??= (async () => {
     await exchange?.stop();
-    if (await readFile2(p.lock, "utf8").catch(() => "") === String(process.pid)) {
+    if (await readFile3(p.lock, "utf8").catch(() => "") === String(process.pid)) {
       await unlink2(p.socket).catch(() => {
       });
       await unlink2(p.lock).catch(() => {
       });
     }
+    await releaseClaim();
   })();
   return cleanupPromise;
 }
@@ -1025,6 +1133,7 @@ try {
   if (idleExitMs !== void 0 && (!Number.isFinite(idleExitMs) || idleExitMs < 0)) throw new Error("Invalid PI_TELEPHONE_IDLE_EXIT_MS");
   exchange = createExchange({ home: p.home, identity, port: config.port, idleExitMs });
   await exchange.start();
+  await releaseClaim();
   await log(p.home, "info", `Exchange started pid=${process.pid}`);
 } catch (error) {
   await log(p.home, "error", `Exchange startup failed: ${error instanceof Error ? error.message : String(error)}`);

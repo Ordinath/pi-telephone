@@ -267,9 +267,13 @@ var TelephoneClient = class extends EventEmitter {
     const id = randomUUID();
     let cancel = () => {
     };
+    let received;
     const reply = new Promise((resolve2, reject) => {
       cancel = reject;
-      this.replies.set(id, { resolve: resolve2, reject });
+      this.replies.set(id, { resolve: (message) => {
+        received = message;
+        resolve2(message);
+      }, reject });
     });
     const onAbort = () => cancel(new TelephoneError("aborted"));
     input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -279,6 +283,7 @@ var TelephoneClient = class extends EventEmitter {
       const [sendResult, replyResult] = await Promise.all([sent, reply]);
       return { sent: sendResult, reply: replyResult };
     } catch (error) {
+      if (received) return { sent: { id, status: "delivered", to: input.to }, reply: received };
       if (this.socket && !this.socket.destroyed) void this.request({ t: "cancelWait", id }).catch(() => {
       });
       throw error;
@@ -332,12 +337,15 @@ else if (!["status", "list", "trust", "untrust", "stop"].includes(command) || ["
         console.log(`Listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : "local only"}`);
         console.log(`Owner: ${owner || "Tailscale unavailable"}`);
         console.log(`Trusted users: ${config.trustedUsers.join(", ") || "none (owner is always trusted)"}`);
-        console.table(entries.filter((entry) => entry.local));
+        const local = entries.filter((entry) => entry.local);
+        if (local.length) console.table(local);
+        else console.log("No sessions.");
         break;
       }
       case "list": {
         const { entries, warnings } = await client.directory();
-        console.table(entries);
+        if (entries.length) console.table(entries);
+        else console.log("No sessions.");
         for (const warning of warnings) console.error(warning);
         break;
       }

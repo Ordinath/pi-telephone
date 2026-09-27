@@ -1,4 +1,4 @@
-import { chmod, unlink } from 'node:fs/promises';
+import { chmod, readFile, unlink } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { createServer, type Socket } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
@@ -18,7 +18,7 @@ interface Registration { session: Session; allow: string[]; status: SessionStatu
 interface Connection { socket: Socket; hello: boolean; registration?: Registration }
 interface Route { session: string; machine: MachineIdentity; local: boolean; ip?: string; port: number }
 interface LedgerEntry { at: number; fromSessionKey: string; to: Route }
-interface Remembered { at: number; targetKey: string; route: Route; message: InboundMessage; answered: boolean }
+interface Remembered { at: number; targetKey: string; route: Route; id: string; expectReply: boolean; answered: boolean }
 interface Waiting { at: number; sessionKey: string; to: Route }
 interface PendingAck { connection: Connection; finish: (accepted: boolean) => void }
 interface Discovery { at: number; hasExchange: boolean; reason?: string }
@@ -61,6 +61,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   const pairRates = new Map<string, number[]>();
   const targetRates = new Map<string, number[]>();
   const local = createServer(socket => {
+    if (stopping) { socket.destroy(); return; }
     const connection: Connection = { socket, hello: false };
     connections.add(connection);
     clearTimeout(idleTimer);
@@ -109,6 +110,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       }
     }
     while (ledger.size > 10000) ledger.delete(ledger.keys().next().value!);
+    while (inbound.size > 10000) inbound.delete(inbound.keys().next().value!);
   }
   function sameRoute(a: Route, b: Route): boolean {
     return a.session === b.session && a.local === b.local && a.machine.fqdn.toLowerCase() === b.machine.fqdn.toLowerCase();
@@ -149,7 +151,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       if (host === listening?.address) return;
       if (network) { await closeServer(network); network = undefined; listening = null; }
       if (!host) { logNetworkState(); return; }
-      const server = networkServer(config.maxMessageBytes + 16384, handleNetwork);
+      const server = networkServer(config.maxMessageBytes + 16384, authenticateNetwork, handleNetwork);
       try { await listen(server, host, options.port); }
       catch (error) { await closeServer(server); throw error; }
       network = server;
@@ -198,7 +200,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const warnings: string[] = [];
     for (const target of names.values()) {
       const registration = registered(target);
-      if (!allows(registration.allow, caller, self.login)) continue;
+      if (!allows(registration.allow, caller, self.login, self.fqdn)) continue;
       const machine = displayMachine(self, self, all);
       entries.push({ address: formatAddress(registration.session.name, machine), session: registration.session.name, machine, fqdn: self.fqdn,
         harness: registration.session.harness, status: registration.status, cwd: registration.session.cwd, local: true, self: target === connection });
@@ -211,7 +213,14 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
         const endpoint = peerEndpoints.get(peer.fqdn);
         const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ''}`, 3000);
         const machine = displayMachine(peer, self, all);
-        for (const session of result.sessions) entries.push({ ...session, address: formatAddress(session.session, machine), machine, fqdn: peer.fqdn, local: false, self: false });
+        if (!Array.isArray(result.sessions)) throw new TelephoneError('unreachable', 'Invalid peer directory');
+        for (const session of result.sessions) {
+          if (!isObject(session) || !validName(session.session) || !validHarness(session.harness) ||
+              (session.status !== 'idle' && session.status !== 'busy')) continue;
+          entries.push({ session: session.session, harness: session.harness, status: session.status,
+            ...(typeof session.cwd === 'string' && session.cwd.length <= 1024 ? { cwd: session.cwd } : {}),
+            address: formatAddress(session.session, machine), machine, fqdn: peer.fqdn, local: false, self: false });
+        }
       } catch (error) {
         const reason = error instanceof TelephoneError ? error.code : 'unreachable';
         if (reason === 'not_trusted') discovery.set(peer.fqdn, { at: now(), hasExchange: true, reason });
@@ -250,8 +259,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     let replyTo = request.replyTo;
     let inferredReplyTo: string | undefined;
     if (!replyTo) {
-      const candidates = [...inbound.values()].filter(entry => entry.targetKey === sender.session.key && entry.message.expectReply && !entry.answered && sameRoute(route, entry.route));
-      if (candidates.length === 1) { replyTo = candidates[0].message.id; inferredReplyTo = replyTo; route = candidates[0].route; }
+      const candidates = [...inbound.values()].filter(entry => entry.targetKey === sender.session.key && entry.expectReply && !entry.answered && sameRoute(route, entry.route));
+      if (candidates.length === 1) { replyTo = candidates[0].id; inferredReplyTo = replyTo; route = candidates[0].route; }
     }
     if (replyTo !== undefined && !isUuid(replyTo)) throw new TelephoneError('invalid_id');
     // Reserve before delivery, so an immediate reply can be authorized.
@@ -284,7 +293,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const previous = body.replyTo ? ledger.get(body.replyTo) : undefined;
     const isReply = !!(registration && previous && previous.fromSessionKey === registration.session.key && sameRoute(previous.to, route));
     if (!isReply && !localCaller && !isTrusted(machine.login, self.login, config.trustedUsers)) throw new TelephoneError('not_trusted');
-    if (!target || !registration || (!isReply && !allows(registration.allow, { session: body.from.session, machine, local: localCaller }, self.login))) throw new TelephoneError('not_reachable');
+    if (!target || !registration || (!isReply && !allows(registration.allow, { session: body.from.session, machine, local: localCaller }, self.login, self.fqdn))) throw new TelephoneError('not_reachable');
     if (Buffer.byteLength(body.text) > config.maxMessageBytes) throw new TelephoneError('too_large');
     if (inbound.has(body.id) || acks.has(body.id) || (!localCaller && ledger.has(body.id))) throw new TelephoneError('invalid_id');
     const pair = `${machine.fqdn}\0${body.from.session}\0${registration.session.key}`;
@@ -307,7 +316,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       text: body.text, expectReply: body.expectReply, replyTo: body.replyTo, isReplyToOwnCall: isReply, sentAt: body.sentAt,
     };
     // Remember before waking the adapter, which may immediately reply by id.
-    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, message, answered: false });
+    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, id: body.id, expectReply: body.expectReply, answered: false });
+    prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine.fqdn, { ip: sourceIP, port: body.fromPort });
     const accepted = await new Promise<boolean>(resolve => {
       const timer = setTimeout(() => finish(false), 5000);
@@ -318,14 +328,15 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     if (!accepted) { inbound.delete(body.id); throw new TelephoneError('delivery_failed', 'Recipient rejected the message or did not acknowledge it'); }
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
-  async function handleNetwork(input: HttpInput): Promise<HttpOutput> {
+  async function authenticateNetwork(input: HttpInput): Promise<MachineIdentity> {
     if (!options.identity.isTailnetAddress(input.sourceIP) || self.ips.includes(input.sourceIP)) throw new TelephoneError('forbidden');
-    const isDelivery = input.method === 'POST' && input.url.pathname === '/v1/deliver';
-    const fromPort = isDelivery && isObject(input.body) && typeof input.body.fromPort === 'number' ? input.body.fromPort : input.fromPort;
-    const machine = await options.identity.whois(input.sourceIP, { fromPort });
+    const machine = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine) throw new TelephoneError('forbidden');
     discovery.set(machine.fqdn, { at: now(), hasExchange: true });
-    const body = isDelivery ? validateDelivery(input.body) : undefined;
+    return machine;
+  }
+  async function handleNetwork(input: HttpInput, machine: MachineIdentity): Promise<HttpOutput> {
+    const body = input.method === 'POST' && input.url.pathname === '/v1/deliver' ? validateDelivery(input.body) : undefined;
     if (input.method === 'GET' && input.url.pathname === '/v1/hello') return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
     if (body) { await deliver(body, machine, false, input.sourceIP); return { body: { status: 'delivered' } }; }
     if (!isTrusted(machine.login, self.login, config.trustedUsers)) throw new TelephoneError('not_trusted');
@@ -335,7 +346,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       const caller: Caller = { session, machine, local: false };
       return { body: { sessions: [...names.values()].flatMap(connection => {
         const registration = registered(connection);
-        if (!allows(registration.allow, caller, self.login)) return [];
+        if (!allows(registration.allow, caller, self.login, self.fqdn)) return [];
         return [{ session: registration.session.name, harness: registration.session.harness, status: registration.status,
           ...(machine.login.toLowerCase() === self.login.toLowerCase() ? { cwd: registration.session.cwd } : {}) }];
       }) } };
@@ -428,11 +439,12 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     stopping ??= (async () => {
       clearInterval(retryTimer);
       clearTimeout(idleTimer);
+      const closed = new Promise<void>(resolve => local.close(() => resolve()));
       for (const connection of connections) connection.socket.destroy();
       await networkRefresh;
       if (network) await closeServer(network);
-      await new Promise<void>(resolve => local.close(() => resolve()));
-      if (ownsSocket) await unlink(p.socket).catch(() => {});
+      await closed;
+      if (ownsSocket && (await readFile(p.lock, 'utf8').catch(() => '')) === String(process.pid)) await unlink(p.socket).catch(() => {});
       await configWrites;
     })();
     return stopping;

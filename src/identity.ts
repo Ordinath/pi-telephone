@@ -40,6 +40,7 @@ export class TailscaleIdentityProvider implements IdentityProvider {
   private status?: { expires: number; value: ReturnType<typeof parseStatus> };
   private pendingStatus?: Promise<ReturnType<typeof parseStatus>>;
   private identities = new Map<string, { expires: number; value: MachineIdentity | undefined }>();
+  private pendingWhois = new Map<string, Promise<MachineIdentity | undefined>>();
   constructor(private readonly tailscaleCli: string | null = null) {}
   private async command(args: string[]): Promise<string> {
     this.executable ??= this.resolveCli();
@@ -69,11 +70,18 @@ export class TailscaleIdentityProvider implements IdentityProvider {
   async whois(ip: string): Promise<MachineIdentity | undefined> {
     const cached = this.identities.get(ip);
     if (cached && cached.expires > Date.now()) return cached.value;
-    let value: MachineIdentity | undefined;
-    try { value = parseWhois(JSON.parse(await this.command(['whois', '--json', ip]))); }
-    catch { value = undefined; }
-    this.identities.set(ip, { expires: Date.now() + (value ? 300000 : 30000), value });
-    return value;
+    let pending = this.pendingWhois.get(ip);
+    if (!pending) {
+      pending = (async () => {
+        let value: MachineIdentity | undefined;
+        try { value = parseWhois(JSON.parse(await this.command(['whois', '--json', ip]))); }
+        catch { value = undefined; }
+        this.identities.set(ip, { expires: Date.now() + (value ? 300000 : 30000), value });
+        return value;
+      })().finally(() => { this.pendingWhois.delete(ip); });
+      this.pendingWhois.set(ip, pending);
+    }
+    return pending;
   }
   isTailnetAddress(ip: string): boolean {
     if (isIP(ip) === 4) {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validName } from '../src/addresses.js';
 import {
-  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
+  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreState, timeoutMs,
   type ReceivedMessage,
 } from '../pi/helpers.js';
 
@@ -66,15 +66,6 @@ test('state restores only the last telephone custom entry and copies its allowli
     assert.deepEqual(restoreState([{ type: 'custom', customType: 'telephone-state', data }]), { on: false, allow: ['owner'] });
   }
   assert.deepEqual(restoreState([{ type: 'custom', customType: 'telephone-state', data: { on: false, name: 'alpha', allow: [] } }]), { on: false, name: 'alpha', allow: [] });
-});
-
-test('inbox restoration retains answered metadata but discards expired and malformed records', () => {
-  const kept = message('kept', { answered: true });
-  assert.deepEqual(restoreInbox([
-    { type: 'custom', customType: 'telephone-inbox', data: [message('earlier')] },
-    { type: 'custom', customType: 'telephone-inbox', data: [kept, message('expired', { receivedAt: 0 }), null, {}] },
-  ], now), [kept]);
-  assert.deepEqual(restoreInbox([], now), []);
 });
 
 test('required fields and ask timeouts reject invalid values', () => {
