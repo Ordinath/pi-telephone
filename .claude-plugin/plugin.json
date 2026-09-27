@@ -1,6 +1,6 @@
 {
   "name": "telephone",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Call and message other agent sessions across your private tailnet.",
   "author": {
     "name": "Nikita Sklyarov"
