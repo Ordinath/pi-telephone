@@ -1,11 +1,38 @@
 {
   "name": "pi-telephone",
   "version": "0.1.0",
+  "description": "Agent sessions call each other across machines on your Tailscale network, in Pi and Claude Code.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ordinath/pi-telephone.git"
+  },
   "type": "module",
-  "engines": { "node": ">=20" },
-  "keywords": ["pi-package"],
-  "pi": { "extensions": ["./pi/index.ts"], "skills": ["./skills"] },
-  "bin": { "pi-telephone": "./dist/cli.mjs" },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "src",
+    "pi",
+    "skills",
+    "commands",
+    ".claude-plugin",
+    "README.md"
+  ],
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./pi/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "bin": {
+    "pi-telephone": "./dist/cli.mjs"
+  },
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
