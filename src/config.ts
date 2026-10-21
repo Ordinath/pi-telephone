@@ -3,8 +3,9 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Config } from './protocol.js';
 
-export const DEFAULT_CONFIG: Config = { port: 47474, trustedUsers: [], tailscaleCli: null, maxMessageBytes: 262144 };
+export const DEFAULT_CONFIG: Config = { port: 47474, trustedUsers: [], tailscaleCli: null, maxMessageBytes: 262144, maxFileBytes: 50000000, maxFiles: 10, inboxMaxBytes: 1000000000, inboxDays: 7 };
 export function homePath(home?: string): string { return resolve(home ?? process.env.PI_TELEPHONE_HOME ?? join(homedir(), '.pi-telephone')); }
+export function inboxPath(home?: string): string { return join(homePath(home), 'inbox'); }
 export function paths(home?: string) {
   const root = homePath(home);
   const normal = join(root, 'exchange.sock');
@@ -36,6 +37,7 @@ export async function loadConfig(home?: string): Promise<Config> {
     const config: Config = { ...DEFAULT_CONFIG, ...value };
     if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535 ||
         !Number.isInteger(config.maxMessageBytes) || config.maxMessageBytes < 1 ||
+        [config.maxFileBytes, config.maxFiles, config.inboxMaxBytes, config.inboxDays].some(value => !Number.isSafeInteger(value) || value < 1) ||
         !Array.isArray(config.trustedUsers) || !config.trustedUsers.every(user => typeof user === 'string' && !!user.trim()) ||
         !(config.tailscaleCli === null || typeof config.tailscaleCli === 'string')) throw new Error('Invalid config.json');
     return config;

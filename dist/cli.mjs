@@ -1,13 +1,5 @@
 #!/usr/bin/env node
 
-// src/client.ts
-import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
-import { createConnection } from "node:net";
-import { fileURLToPath } from "node:url";
-import { setTimeout as sleep } from "node:timers/promises";
-
 // src/config.ts
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -33,6 +25,20 @@ async function clientSocketPath(home) {
 function isFsError(error, code) {
   return error instanceof Error && "code" in error && error.code === code;
 }
+
+// src/files.ts
+function formatBytes(n) {
+  return n < 1e3 ? `${n} B` : n < 1e6 ? `${(n / 1e3).toFixed(1)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(1)} GB`;
+}
+
+// src/client.ts
+import { isAbsolute } from "node:path";
+import { EventEmitter } from "node:events";
+import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import { createConnection } from "node:net";
+import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 
 // src/ndjson.ts
 var MAX_LINE_BYTES = 1024 * 1024;
@@ -67,7 +73,8 @@ function readFrames(socket, receive) {
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var VERSION = false ? "0.1.0" : "0.1.3";
+var FEATURES = ["files"];
+var VERSION = false ? "0.2.0" : "0.2.0";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -162,7 +169,7 @@ var TelephoneClient = class extends EventEmitter {
       void this.receive(value, socket).catch(() => socket.destroy());
     });
     try {
-      const result = await this.request({ t: "hello", proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid } });
+      const result = await this.request({ t: "hello", proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: FEATURES } });
       if (this.registration) {
         await this.request({ t: "register", session: this.registration.session, allow: this.registration.allow });
         if (this.registration.status) await this.request({ t: "update", status: this.registration.status });
@@ -257,12 +264,19 @@ var TelephoneClient = class extends EventEmitter {
     await this.connect();
     return this.request({ t: "directory" });
   }
+  fileInputs(files) {
+    if (files === void 0) return void 0;
+    if (!Array.isArray(files) || !files.length || files.some((path) => typeof path !== "string" || !isAbsolute(path))) throw new TelephoneError("invalid_request", "Files must be absolute paths.");
+    if (!this.info?.features?.includes("files")) throw new TelephoneError("exchange_outdated", `This machine's telephone exchange runs pi-telephone ${this.info?.version}, which cannot send files. Restart it once with /telephone restart in Pi or \`npx pi-telephone stop\`, then send again.`);
+    return files.map((path) => ({ path }));
+  }
   async send(input) {
     await this.connect();
-    return this.request({ t: "send", id: randomUUID(), ...input });
+    return this.request({ t: "send", id: randomUUID(), ...input, files: this.fileInputs(input.files) });
   }
   async ask(input) {
     await this.connect();
+    const files = this.fileInputs(input.files);
     if (input.signal?.aborted) throw new TelephoneError("aborted");
     const id = randomUUID();
     let cancel = () => {
@@ -279,7 +293,7 @@ var TelephoneClient = class extends EventEmitter {
     input.signal?.addEventListener("abort", onAbort, { once: true });
     const timer = setTimeout(() => cancel(new TelephoneError("timeout", "Telephone call timed out")), input.timeoutMs);
     try {
-      const sent = this.request({ t: "send", id, to: input.to, text: input.text, expectReply: true });
+      const sent = this.request({ t: "send", id, to: input.to, text: input.text, expectReply: true, files });
       const [sendResult, replyResult] = await Promise.all([sent, reply]);
       return { sent: sendResult, reply: replyResult };
     } catch (error) {
@@ -331,9 +345,11 @@ else if (!["status", "list", "trust", "untrust", "stop"].includes(command) || ["
     const info = await client.connect();
     switch (command) {
       case "status": {
-        const { config, owner } = await client.getConfig();
+        const { config, owner, inboxBytes } = await client.getConfig();
         const { entries } = await client.directory();
         console.log(`Exchange ${info.version} (protocol ${info.proto}) on ${info.machine.fqdn}`);
+        console.log(`Features: ${info.features?.join(", ") || "none"}`);
+        console.log(`Inbox: ${formatBytes(inboxBytes ?? 0)}`);
         console.log(`Listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : "local only"}`);
         console.log(`Owner: ${owner || "Tailscale unavailable"}`);
         console.log(`Trusted users: ${config.trustedUsers.join(", ") || "none (owner is always trusted)"}`);

@@ -1,3 +1,4 @@
+import { formatBytes } from './files.js';
 import { TelephoneClient } from './client.js';
 import { VERSION } from './protocol.js';
 
@@ -13,9 +14,11 @@ else if (!['status', 'list', 'trust', 'untrust', 'stop'].includes(command) || ([
     const info = await client.connect();
     switch (command) {
       case 'status': {
-        const { config, owner } = await client.getConfig();
+        const { config, owner, inboxBytes } = await client.getConfig();
         const { entries } = await client.directory();
         console.log(`Exchange ${info.version} (protocol ${info.proto}) on ${info.machine.fqdn}`);
+        console.log(`Features: ${info.features?.join(', ') || 'none'}`);
+        console.log(`Inbox: ${formatBytes(inboxBytes ?? 0)}`);
         console.log(`Listening: ${info.listening ? `${info.listening.address}:${info.listening.port}` : 'local only'}`);
         console.log(`Owner: ${owner || 'Tailscale unavailable'}`);
         console.log(`Trusted users: ${config.trustedUsers.join(', ') || 'none (owner is always trusted)'}`);

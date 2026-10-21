@@ -1,3 +1,7 @@
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { formatBytes, inboxFile, isImageMime } from '../src/files.js';
 import { slugify } from '../src/addresses.ts';
 
 export interface TelephoneState { on: boolean; name?: string; allow: string[] }
@@ -65,4 +69,44 @@ export function required(value: string | undefined, parameter: string): string {
 export function timeoutMs(seconds = 600): number {
   if (!Number.isFinite(seconds) || seconds <= 0 || seconds > 3600) throw new Error('timeoutSec must be greater than 0 and at most 3600.');
   return seconds * 1000;
+}
+
+export function resolveFilePath(path: string, cwd: string): string {
+  return resolve(cwd, path === '~' ? homedir() : path.startsWith('~/') ? homedir() + path.slice(1) : path);
+}
+
+export function parseFileCommand(input: string): { path: string; message: string } {
+  const match = input.trim().match(/^(?:"([^"]+)"|'([^']+)'|([^\s"']+))(?:\s+([\s\S]*))?$/);
+  if (!match) throw new Error('Use /telephone file <address> <path> [message]; quote paths containing spaces.');
+  return { path: match[1] ?? match[2] ?? match[3], message: match[4] ?? '' };
+}
+export interface ImageBlock { type: 'image'; data: string; mimeType: string }
+export async function imageBlock(path: string): Promise<ImageBlock | undefined> {
+  const file = await inboxFile(path);
+  if (!isImageMime(file.mime) || file.size > 20000000) return;
+  const bytes = await readFile(file.path);
+  if (bytes.length > 20000000) return;
+  const { resizeImage } = await import('@earendil-works/pi-coding-agent');
+  if (typeof resizeImage === 'function') {
+    const image = await resizeImage(bytes, file.mime);
+    return image ? { type: 'image', data: image.data, mimeType: image.mimeType } : undefined;
+  }
+  const data = bytes.toString('base64');
+  if (data.length <= 4500000) return { type: 'image', data, mimeType: file.mime };
+}
+export async function attachedImages(files: { path: string; mime: string }[] = []): Promise<ImageBlock[]> {
+  const images: ImageBlock[] = [];
+  for (const file of files.filter(file => isImageMime(file.mime)).slice(0, 4)) {
+    try { const image = await imageBlock(file.path); if (image) images.push(image); } catch { /* The saved file remains available. */ }
+  }
+  return images;
+}
+export async function viewFile(path: string) {
+  const file = await inboxFile(path);
+  const content: ({ type: 'text'; text: string } | ImageBlock)[] = [{ type: 'text', text: `${file.path} (${file.mime}, ${formatBytes(file.size)})` }];
+  if (isImageMime(file.mime)) {
+    const image = await imageBlock(file.path);
+    if (image) content.push(image);
+  }
+  return content;
 }

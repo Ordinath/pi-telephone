@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -7,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { clientSocketPath, homePath, isFsError } from './config.js';
 import { readFrames, writeFrame } from './ndjson.js';
 import {
-  PROTO_VERSION, TelephoneError, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage,
+  FEATURES, PROTO_VERSION, TelephoneError, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage,
   type SendInput, type SendResult, type ServerFrame, type Session, type SessionPatch, type TrustPatch,
 } from './protocol.js';
 export { TelephoneError } from './protocol.js';
@@ -87,7 +88,7 @@ export class TelephoneClient extends EventEmitter {
     });
     readFrames(socket, value => { void this.receive(value as ServerFrame, socket).catch(() => socket.destroy()); });
     try {
-      const result = await this.request<{ exchange: ExchangeInfo }>({ t: 'hello', proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid } });
+      const result = await this.request<{ exchange: ExchangeInfo }>({ t: 'hello', proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: FEATURES } });
       if (this.registration) {
         await this.request({ t: 'register', session: this.registration.session, allow: this.registration.allow });
         if (this.registration.status) await this.request({ t: 'update', status: this.registration.status });
@@ -163,12 +164,19 @@ export class TelephoneClient extends EventEmitter {
     this.registration = undefined;
   }
   async directory(): Promise<Directory> { await this.connect(); return this.request<Directory>({ t: 'directory' }); }
+  private fileInputs(files: string[] | undefined): { path: string }[] | undefined {
+    if (files === undefined) return undefined;
+    if (!Array.isArray(files) || !files.length || files.some(path => typeof path !== 'string' || !isAbsolute(path))) throw new TelephoneError('invalid_request', 'Files must be absolute paths.');
+    if (!this.info?.features?.includes('files')) throw new TelephoneError('exchange_outdated', `This machine's telephone exchange runs pi-telephone ${this.info?.version}, which cannot send files. Restart it once with /telephone restart in Pi or \`npx pi-telephone stop\`, then send again.`);
+    return files.map(path => ({ path }));
+  }
   async send(input: SendInput): Promise<SendResult> {
     await this.connect();
-    return this.request<SendResult>({ t: 'send', id: randomUUID(), ...input });
+    return this.request<SendResult>({ t: 'send', id: randomUUID(), ...input, files: this.fileInputs(input.files) });
   }
-  async ask(input: { to: string; text: string; timeoutMs: number; signal?: AbortSignal }): Promise<{ sent: SendResult; reply: InboundMessage }> {
+  async ask(input: { to: string; text: string; timeoutMs: number; signal?: AbortSignal; files?: string[] }): Promise<{ sent: SendResult; reply: InboundMessage }> {
     await this.connect();
+    const files = this.fileInputs(input.files);
     if (input.signal?.aborted) throw new TelephoneError('aborted');
     const id = randomUUID();
     let cancel: (error: Error) => void = () => {};
@@ -181,7 +189,7 @@ export class TelephoneClient extends EventEmitter {
     input.signal?.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => cancel(new TelephoneError('timeout', 'Telephone call timed out')), input.timeoutMs);
     try {
-      const sent = this.request<SendResult>({ t: 'send', id, to: input.to, text: input.text, expectReply: true });
+      const sent = this.request<SendResult>({ t: 'send', id, to: input.to, text: input.text, expectReply: true, files });
       const [sendResult, replyResult] = await Promise.all([sent, reply]);
       return { sent: sendResult, reply: replyResult };
     } catch (error) {
@@ -194,7 +202,7 @@ export class TelephoneClient extends EventEmitter {
       this.replies.delete(id);
     }
   }
-  async getConfig(): Promise<{ config: Config; owner: string }> { await this.connect(); return this.request({ t: 'getConfig' }); }
+  async getConfig(): Promise<{ config: Config; owner: string; inboxBytes: number }> { await this.connect(); return this.request({ t: 'getConfig' }); }
   async setTrustedUsers(patch: TrustPatch): Promise<{ trustedUsers: string[] }> { await this.connect(); return this.request({ t: 'setTrustedUsers', ...patch }); }
   async shutdownExchange(): Promise<void> { await this.connect(); await this.request({ t: 'shutdown' }); }
   async close(): Promise<void> {

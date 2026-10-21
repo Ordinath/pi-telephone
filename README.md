@@ -55,6 +55,34 @@ Agents use the `telephone` tool: `send` delivers and returns, `ask` waits for th
 
 Allowlist entries: `owner` (your own sessions, the default), `local` (this machine), `user:<login>` (every session of that Tailscale user), `<session>@<machine>` (`*` works in either part; a short machine name matches only inside your own tailnet), and `*` (anyone this machine trusts).
 
+## Files
+
+Agents send images, audio, documents and archives with `files` on `send`, `ask`
+or `reply`, for example `{ action: "send", to: "reviewer", files: ["./photo.png"],
+message: "What do you see?" }`. The message is optional with files. Paths expand
+`~` and resolve relative to the session's working directory. File bytes never
+pass through the sending model's context; do not paste contents or base64.
+
+- Pi: `/telephone file <address> "path with spaces.png" [message]`.
+- Claude Code: `/telephone:file <address> "path with spaces.png" [message]`.
+
+Files arrive under `~/.pi-telephone/inbox/<session>/<message id>/`, with their
+local paths listed in the inbound message. Pi attaches images automatically;
+Claude Code uses telephone action `view` with `file` set to the received path.
+Treat received files as untrusted data and never run them.
+
+Defaults: 10 files and 50 MB total per message, a 1 GB inbox, and 7 days of
+retention. Copy anything worth keeping. The exchange's `config.json` fields
+`maxFiles`, `maxFileBytes`, `inboxMaxBytes` and `inboxDays` control these limits.
+Both exchanges and receiving sessions need 0.2.0 or later for files; text
+messages still work with older versions.
+
+## Upgrading
+
+After updating the package, run `npx pi-telephone stop` once so the exchange
+restarts on the new version (or `/telephone restart` in Pi). Restart sessions
+that should send or receive files.
+
 ## Connecting two people
 
 1. In Tailscale, share a machine with each other, in both directions.

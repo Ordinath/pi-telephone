@@ -1,5 +1,5 @@
 // src/exchange/main.ts
-import { open, readFile as readFile3, rename as rename2, stat, unlink as unlink2 } from "node:fs/promises";
+import { open as open2, readFile as readFile3, rename as rename3, stat as stat2, unlink as unlink2 } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
@@ -7,9 +7,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-var DEFAULT_CONFIG = { port: 47474, trustedUsers: [], tailscaleCli: null, maxMessageBytes: 262144 };
+var DEFAULT_CONFIG = { port: 47474, trustedUsers: [], tailscaleCli: null, maxMessageBytes: 262144, maxFileBytes: 5e7, maxFiles: 10, inboxMaxBytes: 1e9, inboxDays: 7 };
 function homePath(home) {
   return resolve(home ?? process.env.PI_TELEPHONE_HOME ?? join(homedir(), ".pi-telephone"));
+}
+function inboxPath(home) {
+  return join(homePath(home), "inbox");
 }
 function paths(home) {
   const root = homePath(home);
@@ -35,7 +38,7 @@ async function loadConfig(home) {
   try {
     const value = JSON.parse(await readFile(paths(home).config, "utf8"));
     const config = { ...DEFAULT_CONFIG, ...value };
-    if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535 || !Number.isInteger(config.maxMessageBytes) || config.maxMessageBytes < 1 || !Array.isArray(config.trustedUsers) || !config.trustedUsers.every((user) => typeof user === "string" && !!user.trim()) || !(config.tailscaleCli === null || typeof config.tailscaleCli === "string")) throw new Error("Invalid config.json");
+    if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535 || !Number.isInteger(config.maxMessageBytes) || config.maxMessageBytes < 1 || [config.maxFileBytes, config.maxFiles, config.inboxMaxBytes, config.inboxDays].some((value2) => !Number.isSafeInteger(value2) || value2 < 1) || !Array.isArray(config.trustedUsers) || !config.trustedUsers.every((user) => typeof user === "string" && !!user.trim()) || !(config.tailscaleCli === null || typeof config.tailscaleCli === "string")) throw new Error("Invalid config.json");
     return config;
   } catch (error) {
     if (!isFsError(error, "ENOENT")) throw error;
@@ -51,10 +54,10 @@ async function saveConfig(home, config) {
   await rename(`${path}.tmp`, path);
 }
 async function log(home, level, message) {
-  const { appendFile, stat: stat2 } = await import("node:fs/promises");
+  const { appendFile, stat: stat3 } = await import("node:fs/promises");
   const path = paths(home).log;
   try {
-    if ((await stat2(path)).size >= 5 * 1024 * 1024) await rename(path, `${path}.1`);
+    if ((await stat3(path)).size >= 5 * 1024 * 1024) await rename(path, `${path}.1`);
   } catch (error) {
     if (!isFsError(error, "ENOENT")) return;
   }
@@ -73,7 +76,8 @@ import { isIP } from "node:net";
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var VERSION = false ? "0.1.0" : "0.1.3";
+var FEATURES = ["files"];
+var VERSION = false ? "0.2.0" : "0.2.0";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -227,9 +231,100 @@ var TailscaleIdentityProvider = class {
 };
 
 // src/exchange/exchange.ts
-import { chmod as chmod2, readFile as readFile2, unlink } from "node:fs/promises";
+import { randomUUID, createHash as createHash2 } from "node:crypto";
+import { createReadStream as createReadStream2 } from "node:fs";
+import { isAbsolute, join as join2 } from "node:path";
+import { chmod as chmod2, mkdir as mkdir2, open, readdir, readFile as readFile2, rename as rename2, rm, rmdir, stat, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
 import { createServer as createServer2 } from "node:net";
+
+// src/files.ts
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { basename, extname, sep } from "node:path";
+function bytePrefix(text, max) {
+  let result = "";
+  for (const char of text) {
+    if (Buffer.byteLength(result + char) > max) break;
+    result += char;
+  }
+  return result;
+}
+function safeFileName(name) {
+  const clean = name.split(/[/\\]/).at(-1).normalize("NFC").replace(/[^\p{L}\p{N} ._()+-]/gu, "_").replace(/_+/g, "_").replace(/ +/g, " ").replace(/^[. _]+|[. ]+$/g, "");
+  const ext = bytePrefix(extname(clean), 99);
+  const stem = clean.slice(0, clean.length - extname(clean).length);
+  return (bytePrefix(stem, 100 - Buffer.byteLength(ext)) || (ext ? "f" : "")) + ext || "file";
+}
+function uniqueNames(names) {
+  const used = /* @__PURE__ */ new Set();
+  return names.map((input) => {
+    const name = safeFileName(input), ext = extname(name), stem = name.slice(0, name.length - ext.length);
+    let unique = name;
+    for (let n = 2; used.has(unique.toLowerCase()); n++) {
+      const suffix = `-${n}${bytePrefix(ext, 99 - Buffer.byteLength(`-${n}`))}`;
+      unique = (bytePrefix(stem, 100 - Buffer.byteLength(suffix)) || "f") + suffix;
+    }
+    used.add(unique.toLowerCase());
+    return unique;
+  });
+}
+var extensions = {
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  json: "application/json",
+  html: "text/html",
+  xml: "application/xml",
+  yaml: "text/yaml",
+  log: "text/plain",
+  mp3: "audio/mpeg",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  opus: "audio/ogg",
+  m4a: "audio/mp4",
+  flac: "audio/flac",
+  aac: "audio/aac",
+  mp4: "video/mp4",
+  mov: "video/quicktime",
+  webm: "video/webm",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  pdf: "application/pdf",
+  zip: "application/zip"
+};
+function detectMime(head, name) {
+  const hex = head.toString("hex"), text = head.toString("latin1");
+  if (hex.startsWith("89504e470d0a1a0a")) return "image/png";
+  if (hex.startsWith("ffd8ff")) return "image/jpeg";
+  if (/^GIF8[79]a/.test(text)) return "image/gif";
+  if (text.startsWith("RIFF") && text.slice(8, 12) === "WEBP") return "image/webp";
+  if (text.startsWith("%PDF-")) return "application/pdf";
+  if (text.startsWith("RIFF") && text.slice(8, 12) === "WAVE") return "audio/wav";
+  if (text.startsWith("OggS")) return "audio/ogg";
+  if (text.startsWith("fLaC")) return "audio/flac";
+  if (text.startsWith("ID3") || head[0] === 255 && (head[1] & 224) === 224) return "audio/mpeg";
+  if (text.slice(4, 8) === "ftyp") return ["M4A ", "M4B "].includes(text.slice(8, 12)) ? "audio/mp4" : "video/mp4";
+  if (hex.startsWith("1a45dfa3")) return "video/webm";
+  if (["504b0304", "504b0506", "504b0708"].some((magic) => hex.startsWith(magic))) return "application/zip";
+  return extensions[extname(name).slice(1).toLowerCase()] ?? "application/octet-stream";
+}
+function formatBytes(n) {
+  return n < 1e3 ? `${n} B` : n < 1e6 ? `${(n / 1e3).toFixed(1)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(1)} GB`;
+}
+async function hashFile(path) {
+  const hash = createHash("sha256");
+  let size = 0, head = Buffer.alloc(0);
+  for await (const chunk of createReadStream(path)) {
+    size += chunk.length;
+    hash.update(chunk);
+    if (head.length < 64) head = Buffer.concat([head, chunk.subarray(0, 64 - head.length)]);
+  }
+  return { size, sha256: hash.digest("hex"), head };
+}
 
 // src/ndjson.ts
 var MAX_LINE_BYTES = 1024 * 1024;
@@ -302,6 +397,7 @@ function allows(allow, caller, owner, selfFqdn) {
 }
 
 // src/exchange/http.ts
+import { once } from "node:events";
 import { createServer, request } from "node:http";
 var peerErrors = {
   not_trusted: "Peer does not trust this machine",
@@ -313,13 +409,21 @@ var peerErrors = {
   invalid_id: "Invalid message id",
   invalid_request: "Invalid request",
   proto_mismatch: "Incompatible telephone protocol",
-  forbidden: "Peer refused the request"
+  forbidden: "Peer refused the request",
+  recipient_unsupported: "The recipient session runs an older pi-telephone and cannot receive files until it restarts.",
+  inbox_full: "The recipient inbox is full",
+  checksum_mismatch: "File checksum did not match",
+  upload_expired: "File upload expired"
 };
 var errorStatus = {
   forbidden: 403,
   not_trusted: 403,
   not_reachable: 404,
   busy_waiting: 409,
+  recipient_unsupported: 409,
+  inbox_full: 507,
+  checksum_mismatch: 422,
+  upload_expired: 410,
   too_large: 413,
   rate_limited: 429,
   delivery_failed: 502,
@@ -332,15 +436,18 @@ function normalizedIP(ip) {
 }
 function networkServer(maxBytes, authenticate, handle) {
   const server = createServer((req, res) => {
-    const timer = setTimeout(() => {
+    const upload = req.method === "PUT" && req.url?.startsWith("/v1/upload/");
+    const abort = () => {
       req.destroy();
       res.destroy();
-    }, 1e4);
+    };
+    const timer = setTimeout(abort, upload ? 15 * 6e4 : 1e4);
+    if (upload) req.setTimeout(3e4, abort);
     res.on("close", () => clearTimeout(timer));
     void serve(req, res, maxBytes, authenticate, handle);
   });
   server.maxConnections = 64;
-  server.requestTimeout = 1e4;
+  server.requestTimeout = 0;
   server.headersTimeout = 1e4;
   return server;
 }
@@ -356,9 +463,10 @@ async function serve(req, res, maxBytes, authenticate, handle) {
       body: void 0
     };
     const identity = await authenticate(input);
+    const upload = input.method === "PUT" && input.url.pathname.startsWith("/v1/upload/");
     let size = 0;
     const chunks = [];
-    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+    if (!upload) for await (const chunk of req.iterator({ destroyOnReturn: false })) {
       size += chunk.length;
       if (size > maxBytes) throw new TelephoneError("too_large");
       chunks.push(chunk);
@@ -371,7 +479,7 @@ async function serve(req, res, maxBytes, authenticate, handle) {
         throw new TelephoneError("invalid_request");
       }
     }
-    const result = await handle({ ...input, body }, identity);
+    const result = await handle({ ...input, body, stream: upload ? req : void 0 }, identity);
     res.writeHead(result.status ?? 200, { "content-type": "application/json" });
     res.end(JSON.stringify(result.body));
   } catch (error) {
@@ -388,10 +496,10 @@ function peerRequest(options) {
       host: options.host,
       port: options.port,
       path: options.path,
-      method: body === void 0 ? "GET" : "POST",
+      method: options.upload ? "PUT" : body === void 0 ? "GET" : "POST",
       localAddress: options.localAddress,
       agent: false,
-      headers: { "content-type": "application/json", "x-telephone-from-port": String(options.fromPort), ...body ? { "content-length": Buffer.byteLength(body) } : {} }
+      headers: { "content-type": options.upload ? "application/octet-stream" : "application/json", "x-telephone-from-port": String(options.fromPort), ...options.upload ? { "content-length": options.size } : body ? { "content-length": Buffer.byteLength(body) } : {} }
     }, (res) => {
       const chunks = [];
       let size = 0;
@@ -429,7 +537,16 @@ function peerRequest(options) {
       clearTimeout(timer);
       clearTimeout(connectTimer);
     });
-    req.end(body);
+    if (options.upload) {
+      req.setTimeout(3e4, () => req.destroy(new TelephoneError("unreachable", "File upload stalled")));
+      void (async () => {
+        for await (const chunk of options.upload) {
+          if (req.destroyed) break;
+          if (!req.write(chunk)) await once(req, "drain");
+        }
+        req.end();
+      })().catch((error) => req.destroy(error));
+    } else req.end(body);
   });
 }
 async function listen(server, host, port) {
@@ -467,6 +584,16 @@ function createExchange(options) {
   let started = false;
   let ownsSocket = false;
   let configWrites = Promise.resolve();
+  let admissions = Promise.resolve();
+  let inboxBytes = 0;
+  let lastPrune = -Infinity;
+  let inboxPruning;
+  let retentionTimer;
+  let uploadTimer;
+  const inbox = inboxPath(options.home);
+  const uploads = /* @__PURE__ */ new Map();
+  const reservations = /* @__PURE__ */ new Map();
+  const transfers = /* @__PURE__ */ new Set();
   const connections = /* @__PURE__ */ new Set();
   const names = /* @__PURE__ */ new Map();
   const ledger = /* @__PURE__ */ new Map();
@@ -628,7 +755,7 @@ function createExchange(options) {
     try {
       const hello = await remote(ip, endpoint?.port ?? config.port, "/v1/hello", 5e3, void 0, 1500);
       if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
-      discovery.set(peer.fqdn, { at: now(), hasExchange: true });
+      discovery.set(peer.fqdn, { at: now(), hasExchange: true, hello });
     } catch (error) {
       const reason = error instanceof TelephoneError ? error.code : "unreachable";
       discovery.set(peer.fqdn, { at: now(), hasExchange: reason === "proto_mismatch", reason });
@@ -710,7 +837,7 @@ function createExchange(options) {
   async function send(connection, request2) {
     const sender = registered(connection);
     prune();
-    if (!isUuid(request2.id) || ledger.has(request2.id) || inbound.has(request2.id) || pendingSends.has(request2.id)) throw new TelephoneError("invalid_id");
+    if (!isUuid(request2.id) || ledger.has(request2.id) || inbound.has(request2.id) || pendingSends.has(request2.id) || reservations.has(request2.id)) throw new TelephoneError("invalid_id");
     if (typeof request2.text !== "string" || request2.expectReply !== void 0 && typeof request2.expectReply !== "boolean") throw new TelephoneError("invalid_request");
     if (Buffer.byteLength(request2.text) > config.maxMessageBytes) throw new TelephoneError("too_large");
     const remembered = request2.replyTo ? inbound.get(request2.replyTo) : void 0;
@@ -718,7 +845,32 @@ function createExchange(options) {
     const pending = { sessionKey: sender.session.key, cancelled: false };
     pendingSends.set(request2.id, pending);
     let route;
+    let files;
     try {
+      if (request2.files !== void 0) {
+        if (!Array.isArray(request2.files) || !request2.files.length || request2.files.length > config.maxFiles) throw new TelephoneError("invalid_request");
+        const names2 = uniqueNames(request2.files.map((file) => {
+          if (!file || typeof file.path !== "string" || !isAbsolute(file.path)) throw new TelephoneError("invalid_request");
+          return file.path;
+        }));
+        files = [];
+        let total = 0;
+        for (const [index, file] of request2.files.entries()) {
+          let hashed;
+          try {
+            const info = await stat(file.path);
+            if (!info.isFile()) throw new Error("Not a regular file");
+            if (info.size > config.maxFileBytes - total) throw new TelephoneError("too_large", `Files exceed this exchange's limit of ${formatBytes(config.maxFileBytes)} per message.`);
+            hashed = await hashFile(file.path);
+          } catch (error) {
+            if (error instanceof TelephoneError) throw error;
+            throw new TelephoneError("file_unreadable", `Cannot read file: ${file.path}`);
+          }
+          total += hashed.size;
+          if (total > config.maxFileBytes) throw new TelephoneError("too_large", `Files exceed this exchange's limit of ${formatBytes(config.maxFileBytes)} per message.`);
+          files.push({ name: names2[index], size: hashed.size, sha256: hashed.sha256, mime: detectMime(hashed.head, file.path) });
+        }
+      }
       route = request2.to ? await resolve2(request2.to) : remembered.route;
     } finally {
       pendingSends.delete(request2.id);
@@ -749,17 +901,54 @@ function createExchange(options) {
       text: request2.text,
       expectReply: request2.expectReply === true,
       replyTo,
-      sentAt: new Date(now()).toISOString()
+      sentAt: new Date(now()).toISOString(),
+      ...files ? { files } : {}
     };
     try {
-      if (route.local) await deliver(message, self, true);
+      if (files) {
+        if (route.local) {
+          const admission2 = await admit(message, self, true);
+          await storeFiles(admission2, randomUUID(), async (directory2) => {
+            for (const [index, file] of files.entries()) {
+              await receiveFiles(createReadStream2(request2.files[index].path), [file], directory2, "checksum_mismatch");
+            }
+          });
+        } else {
+          const cached = discovery.get(route.machine.fqdn);
+          const hello = cached?.hello && cached.at > now() - 6e4 ? cached.hello : await remote(route.ip, route.port, "/v1/hello", 5e3, void 0, 1500);
+          if (hello !== cached?.hello) discovery.set(route.machine.fqdn, { at: now(), hasExchange: true, hello });
+          const version = typeof hello.version === "string" && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : "unknown";
+          if (!Array.isArray(hello.features) || !hello.features.includes("files")) throw new TelephoneError("peer_unsupported", `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
+          if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
+          const peerLimits = hello.limits;
+          if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every((value) => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError("peer_unsupported", "Peer does not advertise valid file limits.");
+          const total = files.reduce((sum, file) => sum + file.size, 0);
+          if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError("too_large", `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
+          const offered = await remote(route.ip, route.port, "/v1/offer", 15e3, message, 1500);
+          if (!isUuid(offered.upload)) throw new TelephoneError("unreachable", "Invalid upload id");
+          async function* bytes() {
+            for (const file of request2.files) yield* createReadStream2(file.path);
+          }
+          await peerRequest({
+            host: route.ip,
+            port: route.port,
+            path: `/v1/upload/${offered.upload}`,
+            timeout: 15 * 6e4,
+            connectTimeout: 1500,
+            fromPort: options.port,
+            localAddress: listening?.address,
+            upload: bytes(),
+            size: total
+          });
+        }
+      } else if (route.local) await deliver(message, self, true);
       else await remote(route.ip, route.port, "/v1/deliver", 8e3, message);
       if (replyTo) {
         const entry = inbound.get(replyTo);
         if (entry?.targetKey === sender.session.key) entry.answered = true;
       }
-      void log(options.home, "info", `Sent ${request2.id} bytes=${Buffer.byteLength(request2.text)} to=${address(route)}`);
-      return { id: request2.id, status: "delivered", to: address(route), ...inferredReplyTo ? { inferredReplyTo } : {} };
+      void log(options.home, "info", `Sent ${request2.id} bytes=${Buffer.byteLength(request2.text)} files=${files?.length ?? 0} fileBytes=${files?.reduce((sum, file) => sum + file.size, 0) ?? 0} to=${address(route)}`);
+      return { id: request2.id, status: "delivered", to: address(route), ...inferredReplyTo ? { inferredReplyTo } : {}, ...files ? { files } : {} };
     } catch (error) {
       ledger.delete(request2.id);
       waits.delete(request2.id);
@@ -767,7 +956,8 @@ function createExchange(options) {
       throw error;
     }
   }
-  async function deliver(body, machine2, localCaller, sourceIP) {
+  async function admission(body, machine2, localCaller, sourceIP) {
+    if (stopping) throw new TelephoneError("not_reachable");
     prune();
     const target = names.get(body.to.session);
     const registration = target?.registration;
@@ -777,7 +967,7 @@ function createExchange(options) {
     if (!isReply && !localCaller && !isTrusted(machine2.login, self.login, config.trustedUsers)) throw new TelephoneError("not_trusted");
     if (!target || !registration || !isReply && !allows(registration.allow, { session: body.from.session, machine: machine2, local: localCaller }, self.login, self.fqdn)) throw new TelephoneError("not_reachable");
     if (Buffer.byteLength(body.text) > config.maxMessageBytes) throw new TelephoneError("too_large");
-    if (inbound.has(body.id) || acks.has(body.id) || !localCaller && ledger.has(body.id)) throw new TelephoneError("invalid_id");
+    if (inbound.has(body.id) || acks.has(body.id) || reservations.has(body.id) || !localCaller && ledger.has(body.id)) throw new TelephoneError("invalid_id");
     const pair = `${machine2.fqdn}\0${body.from.session}\0${registration.session.key}`;
     const pairTimes = pairRates.get(pair) ?? [];
     const targetTimes = targetRates.get(registration.session.key) ?? [];
@@ -791,6 +981,31 @@ function createExchange(options) {
         }
       }
     }
+    if (body.files) {
+      if (!target.features?.includes("files")) throw new TelephoneError("recipient_unsupported", "The recipient session runs an older pi-telephone and cannot receive files until it restarts.");
+      await pruneInbox();
+      const total = body.files.reduce((sum, file) => sum + file.size, 0);
+      const reserved = [...reservations.values()].reduce((sum, size) => sum + size, 0);
+      if (inboxBytes + reserved + total > config.inboxMaxBytes) throw new TelephoneError("inbox_full", "The recipient inbox is full");
+      reservations.set(body.id, total);
+    }
+    return { body, key: registration.session.key, route, isReply };
+  }
+  function admit(body, machine2, localCaller, sourceIP) {
+    const result = admissions.then(() => admission(body, machine2, localCaller, sourceIP));
+    admissions = result.then(() => {
+    }, () => {
+    });
+    return result;
+  }
+  async function deliver(body, machine2, localCaller, sourceIP) {
+    await handover(await admit(body, machine2, localCaller, sourceIP));
+  }
+  async function handover(admitted, files) {
+    const { body, key, route, isReply } = admitted;
+    const target = names.get(body.to.session);
+    const { machine: machine2, local: localCaller, ip: sourceIP } = route;
+    if (stopping || !target || target.registration?.session.key !== key || files && !target.features?.includes("files")) throw new TelephoneError("not_reachable");
     const fromAddress = address(route);
     const message = {
       id: body.id,
@@ -808,9 +1023,10 @@ function createExchange(options) {
       expectReply: body.expectReply,
       replyTo: body.replyTo,
       isReplyToOwnCall: isReply,
-      sentAt: body.sentAt
+      sentAt: body.sentAt,
+      ...files ? { files } : {}
     };
-    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, id: body.id, expectReply: body.expectReply, answered: false });
+    inbound.set(body.id, { at: now(), targetKey: key, route, id: body.id, expectReply: body.expectReply, answered: false });
     prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine2.fqdn, { ip: sourceIP, port: body.fromPort });
     const accepted = await new Promise((resolve3) => {
@@ -833,16 +1049,126 @@ function createExchange(options) {
     }
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
+  async function pruneInbox() {
+    if (inboxPruning) return inboxPruning;
+    inboxPruning = (async () => {
+      const created = await mkdir2(inbox, { recursive: true, mode: 448 });
+      if (!created && lastPrune > now() - 6e4) return;
+      for (const session of await readdir(inbox, { withFileTypes: true })) {
+        if (!session.isDirectory() || session.name === ".incoming") continue;
+        const directory2 = join2(inbox, session.name);
+        for (const message of await readdir(directory2, { withFileTypes: true })) {
+          if (!message.isDirectory() || reservations.has(message.name)) continue;
+          const path = join2(directory2, message.name);
+          if ((await stat(path)).mtimeMs > now() - config.inboxDays * 864e5) continue;
+          await rm(path, { recursive: true, force: true });
+        }
+        await rmdir(directory2).catch(() => {
+        });
+      }
+      let total = 0;
+      for (const session of await readdir(inbox, { withFileTypes: true })) {
+        if (session.isDirectory() && session.name !== ".incoming") total += await directoryBytes(join2(inbox, session.name));
+      }
+      inboxBytes = total;
+      lastPrune = now();
+    })().finally(() => {
+      inboxPruning = void 0;
+    });
+    return inboxPruning;
+  }
+  function storeFiles(admitted, uploadId, write) {
+    const result = saveFiles(admitted, uploadId, write);
+    transfers.add(result);
+    return result.finally(() => transfers.delete(result));
+  }
+  async function saveFiles(admitted, uploadId, write) {
+    const { body, key } = admitted;
+    const stage = join2(inbox, ".incoming", uploadId);
+    const directory2 = join2(inbox, body.to.session, body.id);
+    const files = body.files;
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    let moved = false;
+    try {
+      await mkdir2(join2(inbox, ".incoming"), { recursive: true, mode: 448 });
+      await mkdir2(stage, { mode: 448 });
+      await write(stage);
+      const target = names.get(body.to.session);
+      if (stopping || !target || target.registration?.session.key !== key || !target.features?.includes("files")) throw new TelephoneError("not_reachable");
+      await mkdir2(join2(inbox, body.to.session), { recursive: true, mode: 448 });
+      await rename2(stage, directory2);
+      moved = true;
+      inboxBytes += total;
+      reservations.set(body.id, 0);
+      const received = [];
+      for (const file of files) {
+        const path = join2(directory2, file.name), head = Buffer.alloc(64);
+        const handle = await open(path, "r");
+        let bytesRead;
+        try {
+          ({ bytesRead } = await handle.read(head, 0, head.length, 0));
+        } finally {
+          await handle.close();
+        }
+        received.push({ ...file, path, mime: detectMime(head.subarray(0, bytesRead), file.name) });
+      }
+      await handover(admitted, received);
+    } catch (error) {
+      if (moved) {
+        await rm(directory2, { recursive: true, force: true });
+        inboxBytes -= total;
+      }
+      throw error;
+    } finally {
+      try {
+        await rm(stage, { recursive: true, force: true });
+      } finally {
+        reservations.delete(body.id);
+      }
+    }
+  }
   async function authenticateNetwork(input) {
     if (!options.identity.isTailnetAddress(input.sourceIP) || self.ips.includes(input.sourceIP)) throw new TelephoneError("forbidden");
     const machine2 = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine2) throw new TelephoneError("forbidden");
-    discovery.set(machine2.fqdn, { at: now(), hasExchange: true });
+    const cached = discovery.get(machine2.fqdn);
+    discovery.set(machine2.fqdn, { at: cached?.hello ? cached.at : now(), hasExchange: true, hello: cached?.hello });
     return machine2;
   }
   async function handleNetwork(input, machine2) {
-    const body = input.method === "POST" && input.url.pathname === "/v1/deliver" ? validateDelivery(input.body) : void 0;
-    if (input.method === "GET" && input.url.pathname === "/v1/hello") return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
+    if (input.method === "PUT" && input.url.pathname.startsWith("/v1/upload/")) {
+      const id = input.url.pathname.slice("/v1/upload/".length);
+      const upload = uploads.get(id);
+      if (!upload || upload.started || upload.created <= now() - 6e4) {
+        if (upload && !upload.started) {
+          uploads.delete(id);
+          reservations.delete(upload.admission.body.id);
+        }
+        throw new TelephoneError("upload_expired");
+      }
+      if (upload.machine.fqdn !== machine2.fqdn) throw new TelephoneError("forbidden");
+      if ([...uploads.values()].filter((active) => active.started && active.machine.fqdn === machine2.fqdn).length >= 4) throw new TelephoneError("rate_limited");
+      upload.started = true;
+      try {
+        await storeFiles(upload.admission, id, async (directory2) => {
+          if (!input.stream || input.stream.headers["content-length"] !== String(upload.total)) throw new TelephoneError("invalid_request");
+          await receiveFiles(input.stream.iterator({ destroyOnReturn: false }), upload.admission.body.files, directory2);
+        });
+      } finally {
+        uploads.delete(id);
+      }
+      return { body: { status: "delivered" } };
+    }
+    const offer = input.method === "POST" && input.url.pathname === "/v1/offer";
+    const body = input.method === "POST" && (input.url.pathname === "/v1/deliver" || offer) ? validateDelivery(input.body) : void 0;
+    if (offer && body) {
+      body.files = validateFiles(isObject(input.body) ? input.body.files : void 0, config);
+      const admitted = await admit(body, machine2, false, input.sourceIP);
+      const upload = randomUUID();
+      uploads.set(upload, { admission: admitted, machine: machine2, sourceIP: input.sourceIP, total: body.files.reduce((sum, file) => sum + file.size, 0), created: now(), started: false });
+      return { body: { upload } };
+    }
+    if (input.method === "GET" && input.url.pathname === "/v1/hello") return { body: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo() } };
     if (body) {
       await deliver(body, machine2, false, input.sourceIP);
       return { body: { status: "delivered" } };
@@ -865,6 +1191,9 @@ function createExchange(options) {
     }
     return { status: 404, body: { error: "not_reachable" } };
   }
+  function limits() {
+    return { maxFileBytes: config.maxFileBytes, maxFiles: config.maxFiles };
+  }
   function machineInfo() {
     return { fqdn: self.fqdn, short: self.short, login: self.login };
   }
@@ -872,8 +1201,10 @@ function createExchange(options) {
     await initialRefresh;
     if (request2.t === "hello") {
       if (request2.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
+      if (request2.client?.features !== void 0 && (!Array.isArray(request2.client.features) || !request2.client.features.every((feature) => typeof feature === "string"))) throw new TelephoneError("invalid_request");
       connection.hello = true;
-      return { exchange: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo(), listening } };
+      connection.features = request2.client?.features;
+      return { exchange: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
     }
     if (!connection.hello) throw new TelephoneError("hello_required");
     switch (request2.t) {
@@ -921,7 +1252,7 @@ function createExchange(options) {
         return {};
       }
       case "getConfig":
-        return { config: { ...config, trustedUsers: [...config.trustedUsers] }, owner: self.login };
+        return { config: { ...config, trustedUsers: [...config.trustedUsers] }, owner: self.login, inboxBytes: inboxBytes + [...reservations.values()].reduce((sum, bytes) => sum + bytes, 0) };
       case "setTrustedUsers": {
         for (const list of [request2.add, request2.remove]) if (list !== void 0 && (!Array.isArray(list) || !list.every((user) => typeof user === "string" && !!user.trim() && !/\s/.test(user)))) throw new TelephoneError("invalid_request");
         const write = configWrites.then(async () => {
@@ -948,6 +1279,10 @@ function createExchange(options) {
     started = true;
     await prepareHome(options.home);
     config = await loadConfig(options.home);
+    await mkdir2(inbox, { recursive: true, mode: 448 });
+    await rm(join2(inbox, ".incoming"), { recursive: true, force: true });
+    await mkdir2(join2(inbox, ".incoming"), { mode: 448 });
+    await pruneInbox();
     await new Promise((resolve3, reject) => {
       local.once("error", reject);
       local.listen(p2.socket, () => {
@@ -967,11 +1302,23 @@ function createExchange(options) {
     retryTimer = setInterval(() => {
       networkRefresh = refreshNetwork();
     }, 3e4);
+    retentionTimer = setInterval(() => {
+      void pruneInbox().catch(() => {
+      });
+    }, 36e5);
+    uploadTimer = setInterval(() => {
+      for (const [id, upload] of uploads) if (!upload.started && upload.created <= now() - 6e4) {
+        uploads.delete(id);
+        reservations.delete(upload.admission.body.id);
+      }
+    }, 1e3);
     scheduleIdle();
   }
   function stop() {
     stopping ??= (async () => {
       clearInterval(retryTimer);
+      clearInterval(retentionTimer);
+      clearInterval(uploadTimer);
       clearTimeout(idleTimer);
       const closed = new Promise((resolve3) => local.close(() => resolve3()));
       for (const connection of connections) connection.socket.destroy();
@@ -981,6 +1328,9 @@ function createExchange(options) {
       if (ownsSocket && await readFile2(p2.lock, "utf8").catch(() => "") === String(process.pid)) await unlink(p2.socket).catch(() => {
       });
       await configWrites;
+      await admissions;
+      await Promise.allSettled(transfers);
+      await inboxPruning;
     })();
     return stopping;
   }
@@ -1007,6 +1357,63 @@ function validateDelivery(value) {
     replyTo: value.replyTo,
     sentAt: value.sentAt
   };
+}
+async function directoryBytes(directory) {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join2(directory, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(path);
+    else if (entry.isFile()) total += (await stat(path)).size;
+  }
+  return total;
+}
+async function receiveFiles(source, files, directory, lengthError = "invalid_request") {
+  const iterator = source[Symbol.asyncIterator]();
+  let rest = Buffer.alloc(0);
+  try {
+    for (const file of files) {
+      const handle = await open(join2(directory, file.name), "wx", 384);
+      const hash = createHash2("sha256");
+      let remaining = file.size;
+      try {
+        while (remaining) {
+          if (!rest.length) {
+            const next = await iterator.next();
+            if (next.done) throw new TelephoneError(lengthError, "File body is shorter than offered");
+            rest = next.value;
+          }
+          const chunk = rest.subarray(0, remaining);
+          rest = rest.subarray(chunk.length);
+          remaining -= chunk.length;
+          hash.update(chunk);
+          await handle.writeFile(chunk);
+        }
+      } finally {
+        await handle.close();
+      }
+      if (hash.digest("hex") !== file.sha256) throw new TelephoneError("checksum_mismatch");
+    }
+    if (rest.length || !(await iterator.next()).done) throw new TelephoneError(lengthError, "File body is longer than offered");
+  } finally {
+    await iterator.return?.();
+  }
+}
+function validateFiles(value, config) {
+  if (!Array.isArray(value) || !value.length || value.length > config.maxFiles) throw new TelephoneError("invalid_request");
+  let total = 0;
+  const files = value.map((file) => {
+    if (!isObject(file) || typeof file.name !== "string" || !file.name.length || file.name.length > 255 || typeof file.size !== "number" || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new TelephoneError("invalid_request");
+    total += file.size;
+    if (total > config.maxFileBytes) throw new TelephoneError("too_large");
+    return {
+      name: file.name,
+      size: file.size,
+      sha256: file.sha256,
+      mime: typeof file.mime === "string" && file.mime.length <= 100 && /^[\w.+-]+\/[\w.+-]+$/.test(file.mime) ? file.mime : "application/octet-stream"
+    };
+  });
+  const names = uniqueNames(files.map((file) => file.name));
+  return files.map((file, index) => ({ ...file, name: names[index] }));
 }
 
 // src/exchange/main.ts
@@ -1047,7 +1454,7 @@ async function releaseClaim() {
 async function acquireLock() {
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
-      const file = await open(claim, "wx", 384);
+      const file = await open2(claim, "wx", 384);
       try {
         await file.writeFile(String(process.pid));
       } finally {
@@ -1057,7 +1464,7 @@ async function acquireLock() {
     } catch (error) {
       if (!isFsError(error, "EEXIST")) throw error;
       const owner = Number(await readFile3(claim, "utf8").catch(() => ""));
-      const age = await stat(claim).then((info) => Date.now() - info.mtimeMs).catch(() => 0);
+      const age = await stat2(claim).then((info) => Date.now() - info.mtimeMs).catch(() => 0);
       if (owner && !await pidAlive(owner) || age > 15e3) await unlink2(claim).catch(() => {
       });
       await sleep(50);
@@ -1066,7 +1473,7 @@ async function acquireLock() {
   }
   try {
     try {
-      const file = await open(p.lock, "wx", 384);
+      const file = await open2(p.lock, "wx", 384);
       try {
         await file.writeFile(String(process.pid));
       } finally {
@@ -1080,14 +1487,14 @@ async function acquireLock() {
         return false;
       }
       const temp = `${p.lock}.${process.pid}.tmp`;
-      const file = await open(temp, "wx", 384);
+      const file = await open2(temp, "wx", 384);
       try {
         await file.writeFile(String(process.pid));
       } finally {
         await file.close();
       }
       try {
-        await rename2(temp, p.lock);
+        await rename3(temp, p.lock);
       } finally {
         await unlink2(temp).catch(() => {
         });

@@ -1,6 +1,7 @@
 export const PROTO_VERSION = 1;
+export const FEATURES = ['files'];
 declare const __PACKAGE_VERSION__: string;
-export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.1.0' : __PACKAGE_VERSION__;
+export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.2.0' : __PACKAGE_VERSION__;
 export type Harness = 'pi' | 'claude-code' | 'cli';
 export type SessionStatus = 'idle' | 'busy';
 export interface MachineIdentity {
@@ -23,11 +24,17 @@ export interface Config {
   trustedUsers: string[];
   tailscaleCli: string | null;
   maxMessageBytes: number;
+  maxFileBytes: number;
+  maxFiles: number;
+  inboxMaxBytes: number;
+  inboxDays: number;
 }
 export interface TrustPatch { add?: string[]; remove?: string[] }
 export interface ExchangeInfo {
   version: string;
   proto: number;
+  features?: string[];
+  limits?: { maxFileBytes: number; maxFiles: number };
   machine: Pick<MachineIdentity, 'fqdn' | 'short' | 'login'>;
   listening: { address: string; port: number } | null;
 }
@@ -43,7 +50,10 @@ export interface DirectoryEntry {
   self: boolean;
 }
 export interface Directory { entries: DirectoryEntry[]; warnings: string[] }
+export interface FileInfo { name: string; size: number; sha256: string; mime: string }
+export interface ReceivedFile extends FileInfo { path: string }
 export interface InboundMessage {
+  files?: ReceivedFile[];
   id: string;
   from: {
     address: string;
@@ -61,15 +71,15 @@ export interface InboundMessage {
   isReplyToOwnCall: boolean;
   sentAt: string;
 }
-export interface SendInput { to?: string; text: string; replyTo?: string }
-export interface SendResult { id: string; status: 'delivered'; to: string; inferredReplyTo?: string }
+export interface SendInput { to?: string; text: string; replyTo?: string; files?: string[] }
+export interface SendResult { id: string; status: 'delivered'; to: string; inferredReplyTo?: string; files?: FileInfo[] }
 export interface Ack { t: 'ack'; id: string; accepted: boolean; reason?: string }
 export type Request = { rid: string } & (
-  | { t: 'hello'; proto: number; client: { harness: Harness; version: string; pid: number } }
+  | { t: 'hello'; proto: number; client: { harness: Harness; version: string; pid: number; features?: string[] } }
   | { t: 'register'; session: Session; allow: string[] }
   | ({ t: 'update' } & SessionPatch)
   | { t: 'unregister' | 'directory' | 'getConfig' | 'shutdown' }
-  | ({ t: 'send'; id: string; expectReply?: boolean } & SendInput)
+  | ({ t: 'send'; id: string; expectReply?: boolean; files?: { path: string }[] } & Omit<SendInput, 'files'>)
   | { t: 'cancelWait'; id: string }
   | ({ t: 'setTrustedUsers' } & TrustPatch)
 );
@@ -79,6 +89,7 @@ export type ServerFrame =
   | { t: 'error'; rid: string; code: string; message: string }
   | { t: 'deliver'; message: InboundMessage };
 export interface NetworkDelivery {
+  files?: FileInfo[];
   proto: number;
   id: string;
   from: { session: string; harness: Harness };
@@ -90,6 +101,8 @@ export interface NetworkDelivery {
   sentAt: string;
 }
 export interface NetworkHello {
+  features?: string[];
+  limits?: { maxFileBytes: number; maxFiles: number };
   proto: number;
   version: string;
   machine: ExchangeInfo['machine'];

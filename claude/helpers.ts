@@ -1,3 +1,7 @@
+import { homedir } from 'node:os';
+import { resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { formatBytes, inboxFile, isImageMime } from '../src/files.js';
 import { slugify } from '../src/addresses.js';
 import type { InboundMessage } from '../src/protocol.js';
 
@@ -33,4 +37,28 @@ export function nameCandidates(explicit: string | undefined, previous: string | 
   if (previous !== undefined) return [previous];
   const base = slugify(fallback);
   return [base, ...Array.from({ length: 8 }, (_, i) => `${base.slice(0, 46)}-${i + 2}`)];
+}
+
+export function resolveFilePath(path: string, cwd: string): string {
+  return resolve(cwd, path === '~' ? homedir() : path.startsWith('~/') ? homedir() + path.slice(1) : path);
+}
+
+export interface ImageBlock { type: 'image'; data: string; mimeType: string }
+export async function attachedImages(files: { path: string; mime: string }[] = []): Promise<ImageBlock[]> {
+  const images: ImageBlock[] = [];
+  for (const entry of files.filter(file => isImageMime(file.mime)).slice(0, 4)) {
+    try {
+      const file = await inboxFile(entry.path);
+      if (!isImageMime(file.mime) || file.size > 3500000) continue;
+      const bytes = await readFile(file.path);
+      if (bytes.length <= 3500000) images.push({ type: 'image', data: bytes.toString('base64'), mimeType: file.mime });
+    } catch { /* The saved file remains available. */ }
+  }
+  return images;
+}
+export async function viewFile(path: string) {
+  const file = await inboxFile(path);
+  const content: ({ type: 'text'; text: string } | ImageBlock)[] = [{ type: 'text', text: `${file.path} (${file.mime}, ${formatBytes(file.size)})${isImageMime(file.mime) && file.size > 3500000 ? '; open this image with your Read tool.' : ''}` }];
+  content.push(...await attachedImages([file]));
+  return content;
 }

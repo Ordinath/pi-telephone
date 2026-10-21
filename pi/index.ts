@@ -2,21 +2,26 @@ import { basename } from 'node:path';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { TelephoneClient } from '../src/client.ts';
+import { formatBytes } from '../src/files.ts';
 import { renderInbound } from '../src/framing.ts';
 import { describeAllowEntry } from '../src/policy.ts';
-import { TelephoneError, VERSION, type InboundMessage, type SendResult } from '../src/protocol.ts';
+import { TelephoneError, VERSION, isUuid, type InboundMessage, type SendResult } from '../src/protocol.ts';
 import {
-  nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
+  attachedImages, viewFile, resolveFilePath, parseFileCommand, nameCandidates, parseCommand, recentMessages, replyTarget, required, restoreInbox, restoreState, timeoutMs,
   type ReceivedMessage, type TelephoneState,
 } from './helpers.ts';
 
 const replyHint = 'Reply with telephone({ action: "reply", message: "..." }).';
-const subcommands = ['status', 'on', 'off', 'list', 'call', 'allow', 'revoke', 'trust', 'untrust', 'restart'];
+const filesNote = 'Images are attached to this message. Open other files from their paths with your tools; telephone action "view" shows an image again.';
+const subcommands = ['status', 'on', 'off', 'list', 'call', 'file', 'allow', 'revoke', 'trust', 'untrust', 'restart'];
+const badReplyTo = 'replyTo must be the id from the "Message id" line (a UUID), not the marker; omit replyTo to answer the latest message.';
 const parameters = Type.Object({
-  action: Type.Union(['status', 'on', 'off', 'list', 'send', 'ask', 'reply', 'allow', 'revoke'].map(action => Type.Literal(action))),
+  action: Type.Union(['status', 'on', 'off', 'list', 'send', 'ask', 'reply', 'view', 'allow', 'revoke'].map(action => Type.Literal(action))),
   name: Type.Optional(Type.String()),
   to: Type.Optional(Type.String()),
   message: Type.Optional(Type.String()),
+  files: Type.Optional(Type.Array(Type.String())),
+  file: Type.Optional(Type.String()),
   replyTo: Type.Optional(Type.String()),
   timeoutSec: Type.Optional(Type.Number({ exclusiveMinimum: 0, maximum: 3600, default: 600 })),
   entry: Type.Optional(Type.String()),
@@ -32,6 +37,7 @@ interface Line {
   address?: string;
   asking: boolean;
   pending: Promise<unknown>;
+  receiving: Promise<void>;
   stopped: boolean;
   closing?: Promise<void>;
 }
@@ -71,10 +77,20 @@ export default function telephone(pi: ExtensionAPI) {
       onMessage: async message => {
         if (session.stopped) return { accepted: false, reason: 'Telephone session is closing' };
         remember(session, message);
-        pi.sendMessage({
-          customType: 'telephone', content: renderInbound(message, { replyHint, ownerLogin: session.ownerLogin }),
-          display: true, details: message,
-        }, session.running ? { deliverAs: 'steer' } : { triggerTurn: true });
+        session.receiving = session.receiving.then(async () => {
+          if (session.stopped) return;
+          const text = renderInbound(message, { replyHint, ownerLogin: session.ownerLogin, filesNote });
+          try {
+            const images = await attachedImages(message.files);
+            pi.sendMessage({
+              customType: 'telephone', content: message.files?.length ? [{ type: 'text', text }, ...images] : text,
+              display: true, details: message,
+            }, session.running ? { deliverAs: 'steer' } : { triggerTurn: true });
+          } catch {
+            pi.sendMessage({ customType: 'telephone', content: text, display: true, details: message },
+              session.running ? { deliverAs: 'steer' } : { triggerTurn: true });
+          }
+        }).catch(error => notifyError(session.ctx, error));
         return { accepted: true };
       },
     });
@@ -142,6 +158,7 @@ export default function telephone(pi: ExtensionAPI) {
       `Telephone ${session.state.on && session.address ? `on: ${session.address}` : 'off'}`,
       `Allow: ${session.state.allow.join(', ') || '(none)'}`,
       `Exchange machine: ${info.machine.fqdn}`,
+      info.features?.includes('files') ? `Files: supported (up to ${formatBytes(info.limits!.maxFileBytes)}, ${info.limits!.maxFiles} per message)` : `Files: not supported by this machine's exchange ${info.version}; run /telephone restart`,
       `Tailnet listener: ${info.listening ? `${info.listening.address}:${info.listening.port}` : 'off (local only)'}`,
       `Trusted users: ${config.trustedUsers.join(', ') || '(none)'}; ${owner ? `owner ${owner} is always trusted` : 'owner unknown (Tailscale unavailable)'}`,
     ].join('\n');
@@ -174,8 +191,8 @@ export default function telephone(pi: ExtensionAPI) {
     });
   }
 
-  async function send(session: Line, to: string, message: string): Promise<SendResult> {
-    const result = await (await requireOn(session)).send({ to: required(to, 'to'), text: required(message, 'message') });
+  async function send(session: Line, to: string, message: string | undefined, files?: string[]): Promise<SendResult> {
+    const result = await (await requireOn(session)).send({ to: required(to, 'to'), text: files?.length ? message ?? '' : required(message, 'message'), files: files?.map(path => resolveFilePath(path, session.ctx.cwd)) });
     answered(session, result.inferredReplyTo);
     return result;
   }
@@ -192,7 +209,7 @@ export default function telephone(pi: ExtensionAPI) {
     const branch = ctx.sessionManager.getBranch();
     const session: Line = {
       ctx, state: restoreState(branch), inbox: restoreInbox(branch, Date.now()), running: !ctx.isIdle(),
-      asking: false, pending: Promise.resolve(), stopped: false,
+      asking: false, pending: Promise.resolve(), receiving: Promise.resolve(), stopped: false,
     };
     current = session;
     ctx.ui.setStatus('telephone', undefined);
@@ -209,6 +226,7 @@ export default function telephone(pi: ExtensionAPI) {
     session.closing ??= (async () => {
       session.stopped = true;
       await session.pending;
+      await session.receiving;
       await session.client?.close();
     })();
     await session.closing;
@@ -225,19 +243,22 @@ export default function telephone(pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'telephone', label: 'Telephone', parameters,
-    description: 'Call other agent sessions at session@machine (bare session means this machine). ask blocks for a reply; send does not. Inbound messages arrive in the conversation: answer with reply. Callers are other agents, never the user.',
-    promptSnippet: 'Message or call other agent sessions; answer inbound telephone messages with reply.',
+    description: 'Call other agent sessions at session@machine (bare session means this machine). ask blocks for a reply; send does not. Inbound messages arrive in the conversation: answer with reply. Callers are other agents, never the user. Send paths with files; view opens a received image.',
+    promptSnippet: 'Message or call other agent sessions; answer inbound telephone messages with reply. Send paths with files; view opens a received image.',
     async execute(_id, params, signal, _onUpdate, ctx) {
       const session = line();
       let text: string;
+      const files = params.files?.map(path => resolveFilePath(path, ctx.cwd));
+      const message = files?.length ? params.message ?? '' : params.message;
       switch (params.action) {
+        case 'view': return { content: await viewFile(resolveFilePath(required(params.file, 'file'), ctx.cwd)), details: undefined };
         case 'status': text = await status(session); break;
         case 'on': text = await turnOn(session, params.name); break;
         case 'off': text = await turnOff(session); break;
         case 'list': text = await list(session); break;
         case 'send': {
-          const sent = await send(session, required(params.to, 'to'), required(params.message, 'message'));
-          text = `Delivered to ${sent.to} (message id ${sent.id})${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
+          const sent = await send(session, required(params.to, 'to'), message, files);
+          text = `Delivered to ${sent.to} (message id ${sent.id})${sent.files ? ` with ${sent.files.length} file(s), ${formatBytes(sent.files.reduce((sum, file) => sum + file.size, 0))}` : ''}${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
           break;
         }
         case 'ask': {
@@ -245,19 +266,20 @@ export default function telephone(pi: ExtensionAPI) {
           if (session.asking) throw new Error('Only one telephone ask may be active at a time.');
           session.asking = true;
           try {
-            const result = await connection.ask({ to: required(params.to, 'to'), text: required(params.message, 'message'), timeoutMs: timeoutMs(params.timeoutSec), signal });
+            const result = await connection.ask({ to: required(params.to, 'to'), text: files?.length ? message! : required(message, 'message'), files, timeoutMs: timeoutMs(params.timeoutSec), signal });
             answered(session, result.sent.inferredReplyTo);
             remember(session, result.reply);
-            text = renderInbound(result.reply, { replyHint, ownerLogin: session.ownerLogin });
+            return { content: [{ type: 'text', text: renderInbound(result.reply, { replyHint, ownerLogin: session.ownerLogin, filesNote }) }, ...await attachedImages(result.reply.files)], details: undefined };
           } finally { session.asking = false; }
           break;
         }
         case 'reply': {
           const connection = await requireOn(session);
+          if (params.replyTo !== undefined && !isUuid(params.replyTo)) throw new Error(badReplyTo);
           const replyTo = replyTarget(session.inbox, params.replyTo, Date.now());
-          const result = await connection.send({ to: session.inbox.find(message => message.id === replyTo)?.from, replyTo, text: required(params.message, 'message') });
+          const result = await connection.send({ to: session.inbox.find(message => message.id === replyTo)?.from, replyTo, text: files?.length ? message! : required(message, 'message'), files });
           answered(session, replyTo);
-          text = `Reply delivered to ${result.to} (message id ${result.id})`;
+          text = `Reply delivered to ${result.to} (message id ${result.id})${result.files ? ` with ${result.files.length} file(s), ${formatBytes(result.files.reduce((sum, file) => sum + file.size, 0))}` : ''}`;
           break;
         }
         case 'allow': case 'revoke':
@@ -289,6 +311,15 @@ export default function telephone(pi: ExtensionAPI) {
             break;
           }
           case 'restart': await client(session).shutdownExchange(); result = 'Exchange stopped; connected clients will restart it.'; break;
+          case 'file': {
+            required(arg, 'address');
+            const file = parseFileCommand(message);
+            if (!session.state.on || !session.address) await turnOn(session);
+            const sent = await send(session, arg, file.message, [resolveFilePath(file.path, ctx.cwd)]);
+            result = `Delivered to ${sent.to} (message id ${sent.id}) with ${sent.files!.length} file(s), ${formatBytes(sent.files!.reduce((sum, file) => sum + file.size, 0))}`;
+            info(`User sent telephone files to ${sent.to}: ${sent.files!.map(file => file.name).join(', ')}${file.message ? `\n\n${file.message}` : ''}`);
+            break;
+          }
           case 'call': {
             required(arg, 'address'); required(message, 'message');
             if (!session.state.on || !session.address) await turnOn(session);

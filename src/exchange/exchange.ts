@@ -1,27 +1,33 @@
-import { chmod, readFile, unlink } from 'node:fs/promises';
+import { randomUUID, createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { chmod, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { createServer, type Socket } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
 import { displayMachine, formatAddress, ipv4, parseAddress, resolveMachine, validName, type Peer } from '../addresses.js';
-import { loadConfig, log, paths, prepareHome, saveConfig } from '../config.js';
+import { inboxPath, loadConfig, log, paths, prepareHome, saveConfig } from '../config.js';
+import { detectMime, formatBytes, hashFile, uniqueNames } from '../files.js';
 import type { IdentityProvider } from '../identity.js';
 import { readFrames, writeFrame } from '../ndjson.js';
 import { allows, isTrusted, validateAllow, type Caller } from '../policy.js';
 import {
-  PROTO_VERSION, VERSION, TelephoneError, isUuid,
-  type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage, type MachineIdentity,
+  FEATURES, PROTO_VERSION, VERSION, TelephoneError, isUuid,
+  type FileInfo, type ReceivedFile, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage, type MachineIdentity,
   type NetworkDelivery, type NetworkDirectory, type NetworkHello, type Request, type Session, type SessionStatus,
 } from '../protocol.js';
 import { closeServer, listen, networkServer, peerRequest, type HttpInput, type HttpOutput } from './http.js';
 
 interface Registration { session: Session; allow: string[]; status: SessionStatus }
-interface Connection { socket: Socket; hello: boolean; registration?: Registration }
+interface Connection { socket: Socket; hello: boolean; features?: string[]; registration?: Registration }
 interface Route { session: string; machine: MachineIdentity; local: boolean; ip?: string; port: number }
 interface LedgerEntry { at: number; fromSessionKey: string; to: Route }
 interface Remembered { at: number; targetKey: string; route: Route; id: string; expectReply: boolean; answered: boolean }
 interface Waiting { at: number; sessionKey: string; to: Route }
 interface PendingAck { connection: Connection; finish: (accepted: boolean) => void }
-interface Discovery { at: number; hasExchange: boolean; reason?: string }
+interface Discovery { at: number; hasExchange: boolean; reason?: string; hello?: NetworkHello }
+interface Admission { body: NetworkDelivery; key: string; route: Route; isReply: boolean }
+interface Upload { admission: Admission; machine: MachineIdentity; sourceIP: string; total: number; created: number; started: boolean }
 export interface ExchangeOptions {
   home: string;
   identity: IdentityProvider;
@@ -49,6 +55,16 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   let started = false;
   let ownsSocket = false;
   let configWrites = Promise.resolve();
+  let admissions = Promise.resolve();
+  let inboxBytes = 0;
+  let lastPrune = -Infinity;
+  let inboxPruning: Promise<void> | undefined;
+  let retentionTimer: NodeJS.Timeout | undefined;
+  let uploadTimer: NodeJS.Timeout | undefined;
+  const inbox = inboxPath(options.home);
+  const uploads = new Map<string, Upload>();
+  const reservations = new Map<string, number>();
+  const transfers = new Set<Promise<void>>();
   const connections = new Set<Connection>();
   const names = new Map<string, Connection>();
   const ledger = new Map<string, LedgerEntry>();
@@ -181,7 +197,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     try {
       const hello = await remote<NetworkHello>(ip, endpoint?.port ?? config.port, '/v1/hello', 5000, undefined, 1500);
       if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
-      discovery.set(peer.fqdn, { at: now(), hasExchange: true });
+      discovery.set(peer.fqdn, { at: now(), hasExchange: true, hello });
     } catch (error) {
       const reason = error instanceof TelephoneError ? error.code : 'unreachable';
       discovery.set(peer.fqdn, { at: now(), hasExchange: reason === 'proto_mismatch', reason });
@@ -244,7 +260,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   async function send(connection: Connection, request: Extract<Request, { t: 'send' }>) {
     const sender = registered(connection);
     prune();
-    if (!isUuid(request.id) || ledger.has(request.id) || inbound.has(request.id) || pendingSends.has(request.id)) throw new TelephoneError('invalid_id');
+    if (!isUuid(request.id) || ledger.has(request.id) || inbound.has(request.id) || pendingSends.has(request.id) || reservations.has(request.id)) throw new TelephoneError('invalid_id');
     if (typeof request.text !== 'string' || (request.expectReply !== undefined && typeof request.expectReply !== 'boolean')) throw new TelephoneError('invalid_request');
     if (Buffer.byteLength(request.text) > config.maxMessageBytes) throw new TelephoneError('too_large');
     const remembered = request.replyTo ? inbound.get(request.replyTo) : undefined;
@@ -252,7 +268,34 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const pending = { sessionKey: sender.session.key, cancelled: false };
     pendingSends.set(request.id, pending);
     let route: Route;
-    try { route = request.to ? await resolve(request.to) : remembered!.route; }
+    let files: FileInfo[] | undefined;
+    try {
+      if (request.files !== undefined) {
+        if (!Array.isArray(request.files) || !request.files.length || request.files.length > config.maxFiles) throw new TelephoneError('invalid_request');
+        const names = uniqueNames(request.files.map(file => {
+          if (!file || typeof file.path !== 'string' || !isAbsolute(file.path)) throw new TelephoneError('invalid_request');
+          return file.path;
+        }));
+        files = [];
+        let total = 0;
+        for (const [index, file] of request.files.entries()) {
+          let hashed;
+          try {
+            const info = await stat(file.path);
+            if (!info.isFile()) throw new Error('Not a regular file');
+            if (info.size > config.maxFileBytes - total) throw new TelephoneError('too_large', `Files exceed this exchange's limit of ${formatBytes(config.maxFileBytes)} per message.`);
+            hashed = await hashFile(file.path);
+          } catch (error) {
+            if (error instanceof TelephoneError) throw error;
+            throw new TelephoneError('file_unreadable', `Cannot read file: ${file.path}`);
+          }
+          total += hashed.size;
+          if (total > config.maxFileBytes) throw new TelephoneError('too_large', `Files exceed this exchange's limit of ${formatBytes(config.maxFileBytes)} per message.`);
+          files.push({ name: names[index], size: hashed.size, sha256: hashed.sha256, mime: detectMime(hashed.head, file.path) });
+        }
+      }
+      route = request.to ? await resolve(request.to) : remembered!.route;
+    }
     finally { pendingSends.delete(request.id); }
     if (connection.registration !== sender || connection.socket.destroyed) throw new TelephoneError('not_registered');
     if (remembered && remembered.targetKey === sender.session.key && (!request.to || sameRoute(route, remembered.route))) route = remembered.route;
@@ -271,13 +314,42 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const message: NetworkDelivery = {
       proto: PROTO_VERSION, id: request.id, from: { session: sender.session.name, harness: sender.session.harness },
       fromPort: options.port, to: { session: route.session }, text: request.text, expectReply: request.expectReply === true, replyTo, sentAt: new Date(now()).toISOString(),
+      ...(files ? { files } : {}),
     };
     try {
-      if (route.local) await deliver(message, self, true);
+      if (files) {
+        if (route.local) {
+          const admission = await admit(message, self, true);
+          await storeFiles(admission, randomUUID(), async directory => {
+            for (const [index, file] of files.entries()) {
+              await receiveFiles(createReadStream(request.files![index].path), [file], directory, 'checksum_mismatch');
+            }
+          });
+        } else {
+          const cached = discovery.get(route.machine.fqdn);
+          const hello = cached?.hello && cached.at > now() - 60000 ? cached.hello
+            : await remote<NetworkHello>(route.ip!, route.port, '/v1/hello', 5000, undefined, 1500);
+          if (hello !== cached?.hello) discovery.set(route.machine.fqdn, { at: now(), hasExchange: true, hello });
+          const version = typeof hello.version === 'string' && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : 'unknown';
+          if (!Array.isArray(hello.features) || !hello.features.includes('files')) throw new TelephoneError('peer_unsupported', `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
+          if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
+          const peerLimits = hello.limits;
+          if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every(value => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError('peer_unsupported', 'Peer does not advertise valid file limits.');
+          const total = files.reduce((sum, file) => sum + file.size, 0);
+          if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError('too_large', `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
+          const offered = await remote<{ upload: string }>(route.ip!, route.port, '/v1/offer', 15000, message, 1500);
+          if (!isUuid(offered.upload)) throw new TelephoneError('unreachable', 'Invalid upload id');
+          async function* bytes() {
+            for (const file of request.files!) yield* createReadStream(file.path);
+          }
+          await peerRequest({ host: route.ip!, port: route.port, path: `/v1/upload/${offered.upload}`, timeout: 15 * 60000,
+            connectTimeout: 1500, fromPort: options.port, localAddress: listening?.address, upload: bytes(), size: total });
+        }
+      } else if (route.local) await deliver(message, self, true);
       else await remote(route.ip!, route.port, '/v1/deliver', 8000, message);
       if (replyTo) { const entry = inbound.get(replyTo); if (entry?.targetKey === sender.session.key) entry.answered = true; }
-      void log(options.home, 'info', `Sent ${request.id} bytes=${Buffer.byteLength(request.text)} to=${address(route)}`);
-      return { id: request.id, status: 'delivered', to: address(route), ...(inferredReplyTo ? { inferredReplyTo } : {}) };
+      void log(options.home, 'info', `Sent ${request.id} bytes=${Buffer.byteLength(request.text)} files=${files?.length ?? 0} fileBytes=${files?.reduce((sum, file) => sum + file.size, 0) ?? 0} to=${address(route)}`);
+      return { id: request.id, status: 'delivered', to: address(route), ...(inferredReplyTo ? { inferredReplyTo } : {}), ...(files ? { files } : {}) };
     } catch (error) {
       ledger.delete(request.id);
       waits.delete(request.id);
@@ -285,7 +357,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       throw error;
     }
   }
-  async function deliver(body: NetworkDelivery, machine: MachineIdentity, localCaller: boolean, sourceIP?: string): Promise<void> {
+  async function admission(body: NetworkDelivery, machine: MachineIdentity, localCaller: boolean, sourceIP?: string): Promise<Admission> {
+    if (stopping) throw new TelephoneError('not_reachable');
     prune();
     const target = names.get(body.to.session);
     const registration = target?.registration;
@@ -295,7 +368,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     if (!isReply && !localCaller && !isTrusted(machine.login, self.login, config.trustedUsers)) throw new TelephoneError('not_trusted');
     if (!target || !registration || (!isReply && !allows(registration.allow, { session: body.from.session, machine, local: localCaller }, self.login, self.fqdn))) throw new TelephoneError('not_reachable');
     if (Buffer.byteLength(body.text) > config.maxMessageBytes) throw new TelephoneError('too_large');
-    if (inbound.has(body.id) || acks.has(body.id) || (!localCaller && ledger.has(body.id))) throw new TelephoneError('invalid_id');
+    if (inbound.has(body.id) || acks.has(body.id) || reservations.has(body.id) || (!localCaller && ledger.has(body.id))) throw new TelephoneError('invalid_id');
     const pair = `${machine.fqdn}\0${body.from.session}\0${registration.session.key}`;
     const pairTimes = pairRates.get(pair) ?? [];
     const targetTimes = targetRates.get(registration.session.key) ?? [];
@@ -309,14 +382,38 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
         }
       }
     }
+    if (body.files) {
+      if (!target.features?.includes('files')) throw new TelephoneError('recipient_unsupported', 'The recipient session runs an older pi-telephone and cannot receive files until it restarts.');
+      await pruneInbox();
+      const total = body.files.reduce((sum, file) => sum + file.size, 0);
+      const reserved = [...reservations.values()].reduce((sum, size) => sum + size, 0);
+      if (inboxBytes + reserved + total > config.inboxMaxBytes) throw new TelephoneError('inbox_full', 'The recipient inbox is full');
+      reservations.set(body.id, total);
+    }
+    return { body, key: registration.session.key, route, isReply };
+  }
+  function admit(body: NetworkDelivery, machine: MachineIdentity, localCaller: boolean, sourceIP?: string): Promise<Admission> {
+    const result = admissions.then(() => admission(body, machine, localCaller, sourceIP));
+    admissions = result.then(() => {}, () => {});
+    return result;
+  }
+  async function deliver(body: NetworkDelivery, machine: MachineIdentity, localCaller: boolean, sourceIP?: string): Promise<void> {
+    await handover(await admit(body, machine, localCaller, sourceIP));
+  }
+  async function handover(admitted: Admission, files?: ReceivedFile[]): Promise<void> {
+    const { body, key, route, isReply } = admitted;
+    const target = names.get(body.to.session);
+    const { machine, local: localCaller, ip: sourceIP } = route;
+    if (stopping || !target || target.registration?.session.key !== key || (files && !target.features?.includes('files'))) throw new TelephoneError('not_reachable');
     const fromAddress = address(route);
     const message: InboundMessage = {
       id: body.id, from: { address: fromAddress, session: body.from.session, machine: fromAddress.split('@')[1], fqdn: machine.fqdn,
         login: machine.login, displayName: machine.displayName, harness: body.from.harness, local: localCaller },
       text: body.text, expectReply: body.expectReply, replyTo: body.replyTo, isReplyToOwnCall: isReply, sentAt: body.sentAt,
+      ...(files ? { files } : {}),
     };
     // Remember before waking the adapter, which may immediately reply by id.
-    inbound.set(body.id, { at: now(), targetKey: registration.session.key, route, id: body.id, expectReply: body.expectReply, answered: false });
+    inbound.set(body.id, { at: now(), targetKey: key, route, id: body.id, expectReply: body.expectReply, answered: false });
     prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine.fqdn, { ip: sourceIP, port: body.fromPort });
     const accepted = await new Promise<boolean>(resolve => {
@@ -328,16 +425,108 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     if (!accepted) { inbound.delete(body.id); throw new TelephoneError('delivery_failed', 'Recipient rejected the message or did not acknowledge it'); }
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
+  async function pruneInbox(): Promise<void> {
+    if (inboxPruning) return inboxPruning;
+    inboxPruning = (async () => {
+      const created = await mkdir(inbox, { recursive: true, mode: 0o700 });
+      if (!created && lastPrune > now() - 60000) return;
+      for (const session of await readdir(inbox, { withFileTypes: true })) {
+        if (!session.isDirectory() || session.name === '.incoming') continue;
+        const directory = join(inbox, session.name);
+        for (const message of await readdir(directory, { withFileTypes: true })) {
+          if (!message.isDirectory() || reservations.has(message.name)) continue;
+          const path = join(directory, message.name);
+          if ((await stat(path)).mtimeMs > now() - config.inboxDays * 86400000) continue;
+          await rm(path, { recursive: true, force: true });
+        }
+        await rmdir(directory).catch(() => {});
+      }
+      let total = 0;
+      for (const session of await readdir(inbox, { withFileTypes: true })) {
+        if (session.isDirectory() && session.name !== '.incoming') total += await directoryBytes(join(inbox, session.name));
+      }
+      inboxBytes = total;
+      lastPrune = now();
+    })().finally(() => { inboxPruning = undefined; });
+    return inboxPruning;
+  }
+  function storeFiles(admitted: Admission, uploadId: string, write: (directory: string) => Promise<void>): Promise<void> {
+    const result = saveFiles(admitted, uploadId, write);
+    transfers.add(result);
+    return result.finally(() => transfers.delete(result));
+  }
+  async function saveFiles(admitted: Admission, uploadId: string, write: (directory: string) => Promise<void>): Promise<void> {
+    const { body, key } = admitted;
+    const stage = join(inbox, '.incoming', uploadId);
+    const directory = join(inbox, body.to.session, body.id);
+    const files = body.files!;
+    const total = files.reduce((sum, file) => sum + file.size, 0);
+    let moved = false;
+    try {
+      await mkdir(join(inbox, '.incoming'), { recursive: true, mode: 0o700 });
+      await mkdir(stage, { mode: 0o700 });
+      await write(stage);
+      const target = names.get(body.to.session);
+      if (stopping || !target || target.registration?.session.key !== key || !target.features?.includes('files')) throw new TelephoneError('not_reachable');
+      await mkdir(join(inbox, body.to.session), { recursive: true, mode: 0o700 });
+      await rename(stage, directory);
+      moved = true;
+      inboxBytes += total;
+      reservations.set(body.id, 0);
+      const received: ReceivedFile[] = [];
+      for (const file of files) {
+        const path = join(directory, file.name), head = Buffer.alloc(64);
+        const handle = await open(path, 'r');
+        let bytesRead: number;
+        try { ({ bytesRead } = await handle.read(head, 0, head.length, 0)); } finally { await handle.close(); }
+        received.push({ ...file, path, mime: detectMime(head.subarray(0, bytesRead), file.name) });
+      }
+      await handover(admitted, received);
+    } catch (error) {
+      if (moved) { await rm(directory, { recursive: true, force: true }); inboxBytes -= total; }
+      throw error;
+    } finally {
+      try { await rm(stage, { recursive: true, force: true }); }
+      finally { reservations.delete(body.id); }
+    }
+  }
   async function authenticateNetwork(input: HttpInput): Promise<MachineIdentity> {
     if (!options.identity.isTailnetAddress(input.sourceIP) || self.ips.includes(input.sourceIP)) throw new TelephoneError('forbidden');
     const machine = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine) throw new TelephoneError('forbidden');
-    discovery.set(machine.fqdn, { at: now(), hasExchange: true });
+    const cached = discovery.get(machine.fqdn);
+    discovery.set(machine.fqdn, { at: cached?.hello ? cached.at : now(), hasExchange: true, hello: cached?.hello });
     return machine;
   }
   async function handleNetwork(input: HttpInput, machine: MachineIdentity): Promise<HttpOutput> {
-    const body = input.method === 'POST' && input.url.pathname === '/v1/deliver' ? validateDelivery(input.body) : undefined;
-    if (input.method === 'GET' && input.url.pathname === '/v1/hello') return { body: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo() } };
+    if (input.method === 'PUT' && input.url.pathname.startsWith('/v1/upload/')) {
+      const id = input.url.pathname.slice('/v1/upload/'.length);
+      const upload = uploads.get(id);
+      if (!upload || upload.started || upload.created <= now() - 60000) {
+        if (upload && !upload.started) { uploads.delete(id); reservations.delete(upload.admission.body.id); }
+        throw new TelephoneError('upload_expired');
+      }
+      if (upload.machine.fqdn !== machine.fqdn) throw new TelephoneError('forbidden');
+      if ([...uploads.values()].filter(active => active.started && active.machine.fqdn === machine.fqdn).length >= 4) throw new TelephoneError('rate_limited');
+      upload.started = true;
+      try {
+        await storeFiles(upload.admission, id, async directory => {
+          if (!input.stream || input.stream.headers['content-length'] !== String(upload.total)) throw new TelephoneError('invalid_request');
+          await receiveFiles(input.stream.iterator({ destroyOnReturn: false }), upload.admission.body.files!, directory);
+        });
+      } finally { uploads.delete(id); }
+      return { body: { status: 'delivered' } };
+    }
+    const offer = input.method === 'POST' && input.url.pathname === '/v1/offer';
+    const body = input.method === 'POST' && (input.url.pathname === '/v1/deliver' || offer) ? validateDelivery(input.body) : undefined;
+    if (offer && body) {
+      body.files = validateFiles(isObject(input.body) ? input.body.files : undefined, config);
+      const admitted = await admit(body, machine, false, input.sourceIP);
+      const upload = randomUUID();
+      uploads.set(upload, { admission: admitted, machine, sourceIP: input.sourceIP, total: body.files.reduce((sum, file) => sum + file.size, 0), created: now(), started: false });
+      return { body: { upload } };
+    }
+    if (input.method === 'GET' && input.url.pathname === '/v1/hello') return { body: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo() } };
     if (body) { await deliver(body, machine, false, input.sourceIP); return { body: { status: 'delivered' } }; }
     if (!isTrusted(machine.login, self.login, config.trustedUsers)) throw new TelephoneError('not_trusted');
     if (input.method === 'GET' && input.url.pathname === '/v1/directory') {
@@ -353,13 +542,16 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     }
     return { status: 404, body: { error: 'not_reachable' } };
   }
+  function limits() { return { maxFileBytes: config.maxFileBytes, maxFiles: config.maxFiles }; }
   function machineInfo(): ExchangeInfo['machine'] { return { fqdn: self.fqdn, short: self.short, login: self.login }; }
   async function handleLocal(connection: Connection, request: Request): Promise<Record<string, unknown>> {
     await initialRefresh;
     if (request.t === 'hello') {
       if (request.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
+      if (request.client?.features !== undefined && (!Array.isArray(request.client.features) || !request.client.features.every(feature => typeof feature === 'string'))) throw new TelephoneError('invalid_request');
       connection.hello = true;
-      return { exchange: { proto: PROTO_VERSION, version: VERSION, machine: machineInfo(), listening } };
+      connection.features = request.client?.features;
+      return { exchange: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
     }
     if (!connection.hello) throw new TelephoneError('hello_required');
     switch (request.t) {
@@ -398,7 +590,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
         if (pending?.sessionKey === key) pending.cancelled = true;
         return {};
       }
-      case 'getConfig': return { config: { ...config, trustedUsers: [...config.trustedUsers] }, owner: self.login };
+      case 'getConfig': return { config: { ...config, trustedUsers: [...config.trustedUsers] }, owner: self.login, inboxBytes: inboxBytes + [...reservations.values()].reduce((sum, bytes) => sum + bytes, 0) };
       case 'setTrustedUsers': {
         for (const list of [request.add, request.remove]) if (list !== undefined && (!Array.isArray(list) || !list.every(user => typeof user === 'string' && !!user.trim() && !/\s/.test(user)))) throw new TelephoneError('invalid_request');
         const write = configWrites.then(async () => {
@@ -422,6 +614,10 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     started = true;
     await prepareHome(options.home);
     config = await loadConfig(options.home);
+    await mkdir(inbox, { recursive: true, mode: 0o700 });
+    await rm(join(inbox, '.incoming'), { recursive: true, force: true });
+    await mkdir(join(inbox, '.incoming'), { mode: 0o700 });
+    await pruneInbox();
     await new Promise<void>((resolve, reject) => {
       local.once('error', reject);
       local.listen(p.socket, () => { local.off('error', reject); ownsSocket = true; resolve(); });
@@ -433,11 +629,19 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     } finally { initialRefreshDone(); }
     if (stopping) return;
     retryTimer = setInterval(() => { networkRefresh = refreshNetwork(); }, 30000);
+    retentionTimer = setInterval(() => { void pruneInbox().catch(() => {}); }, 3600000);
+    uploadTimer = setInterval(() => {
+      for (const [id, upload] of uploads) if (!upload.started && upload.created <= now() - 60000) {
+        uploads.delete(id); reservations.delete(upload.admission.body.id);
+      }
+    }, 1000);
     scheduleIdle();
   }
   function stop(): Promise<void> {
     stopping ??= (async () => {
       clearInterval(retryTimer);
+      clearInterval(retentionTimer);
+      clearInterval(uploadTimer);
       clearTimeout(idleTimer);
       const closed = new Promise<void>(resolve => local.close(() => resolve()));
       for (const connection of connections) connection.socket.destroy();
@@ -446,6 +650,9 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       await closed;
       if (ownsSocket && (await readFile(p.lock, 'utf8').catch(() => '')) === String(process.pid)) await unlink(p.socket).catch(() => {});
       await configWrites;
+      await admissions;
+      await Promise.allSettled(transfers);
+      await inboxPruning;
     })();
     return stopping;
   }
@@ -465,4 +672,56 @@ function validateDelivery(value: unknown): NetworkDelivery {
     fromPort: value.fromPort, to: { session: value.to.session }, text: value.text,
     expectReply: value.expectReply, replyTo: value.replyTo, sentAt: value.sentAt,
   };
+}
+
+async function directoryBytes(directory: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(path);
+    else if (entry.isFile()) total += (await stat(path)).size;
+  }
+  return total;
+}
+async function receiveFiles(source: AsyncIterable<Buffer>, files: FileInfo[], directory: string, lengthError = 'invalid_request'): Promise<void> {
+  const iterator = source[Symbol.asyncIterator]();
+  let rest: Buffer = Buffer.alloc(0);
+  try {
+    for (const file of files) {
+      const handle = await open(join(directory, file.name), 'wx', 0o600);
+      const hash = createHash('sha256');
+      let remaining = file.size;
+      try {
+        while (remaining) {
+          if (!rest.length) {
+            const next = await iterator.next();
+            if (next.done) throw new TelephoneError(lengthError, 'File body is shorter than offered');
+            rest = next.value;
+          }
+          const chunk = rest.subarray(0, remaining);
+          rest = rest.subarray(chunk.length);
+          remaining -= chunk.length;
+          hash.update(chunk);
+          await handle.writeFile(chunk);
+        }
+      } finally { await handle.close(); }
+      if (hash.digest('hex') !== file.sha256) throw new TelephoneError('checksum_mismatch');
+    }
+    if (rest.length || !(await iterator.next()).done) throw new TelephoneError(lengthError, 'File body is longer than offered');
+  } finally { await iterator.return?.(); }
+}
+function validateFiles(value: unknown, config: Config): FileInfo[] {
+  if (!Array.isArray(value) || !value.length || value.length > config.maxFiles) throw new TelephoneError('invalid_request');
+  let total = 0;
+  const files = value.map(file => {
+    if (!isObject(file) || typeof file.name !== 'string' || !file.name.length || file.name.length > 255 ||
+        typeof file.size !== 'number' || !Number.isSafeInteger(file.size) || file.size < 0 ||
+        typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new TelephoneError('invalid_request');
+    total += file.size;
+    if (total > config.maxFileBytes) throw new TelephoneError('too_large');
+    return { name: file.name, size: file.size, sha256: file.sha256,
+      mime: typeof file.mime === 'string' && file.mime.length <= 100 && /^[\w.+-]+\/[\w.+-]+$/.test(file.mime) ? file.mime : 'application/octet-stream' };
+  });
+  const names = uniqueNames(files.map(file => file.name));
+  return files.map((file, index) => ({ ...file, name: names[index] }));
 }

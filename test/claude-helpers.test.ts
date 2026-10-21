@@ -50,3 +50,12 @@ test('Claude name candidates preserve explicit and previous names, suffix only d
   assert.equal(long[8], `${'x'.repeat(46)}-9`);
   assert.ok(long.every(validName));
 });
+
+test('Claude file paths expand home and resolve relative to the project cwd', async () => {
+  const { homedir } = await import('node:os');
+  const { resolveFilePath } = await import('../claude/helpers.js');
+  assert.equal(resolveFilePath('~/photo.png', '/project'), `${homedir()}/photo.png`);
+  assert.equal(resolveFilePath('~', '/project'), homedir());
+  assert.equal(resolveFilePath('images/photo.png', '/project'), '/project/images/photo.png');
+  assert.equal(resolveFilePath('/photo.png', '/project'), '/photo.png');
+});

@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { TelephoneClient } from '../src/client.js';
+import type { InboundMessage } from '../src/protocol.js';
 import { paths, isFsError } from '../src/config.js';
 
 test('bundled daemon starts on demand, locks exclusively and removes private state on idle exit', { timeout: 15000 }, async t => {
@@ -16,10 +17,13 @@ test('bundled daemon starts on demand, locks exclusively and removes private sta
   process.env.PI_TELEPHONE_IDLE_EXIT_MS = '200';
   const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
   const client = new TelephoneClient({ harness: 'pi', version: 'test', exchangeEntry: entry, onMessage: async () => ({ accepted: true }) });
+  const messages: InboundMessage[] = [];
+  const receiver = new TelephoneClient({ harness: 'pi', version: 'test', exchangeEntry: entry, onMessage: async message => { messages.push(message); return { accepted: true }; } });
   const p = paths(home);
   let pid: number | undefined;
   t.after(async () => {
     await client.close();
+    await receiver.close();
     if (pid) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; } }
     for (const [key, value] of [['PI_TELEPHONE_HOME', previous.home], ['PI_TELEPHONE_NETWORK', previous.network], ['PI_TELEPHONE_IDLE_EXIT_MS', previous.idle]]) {
       if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
@@ -44,6 +48,13 @@ test('bundled daemon starts on demand, locks exclusively and removes private sta
   assert.equal(Number(await readFile(p.lock, 'utf8')), pid);
   assert.equal((await stat(p.socket)).ino, socketStat.ino);
   await client.getConfig();
+  await client.register({ key: 'sender', name: 'sender', harness: 'pi', cwd: home, hostPid: process.pid });
+  await receiver.register({ key: 'receiver', name: 'receiver', harness: 'pi', cwd: home, hostPid: process.pid });
+  const bytes = Buffer.from([0, 255, 1, 2, 3]);
+  await writeFile(`${home}/source.bin`, bytes);
+  await client.send({ to: 'receiver', text: '', files: [`${home}/source.bin`] });
+  assert.deepEqual(await readFile(messages[0].files![0].path), bytes);
+  await receiver.close();
   await client.close();
   const deadline = Date.now() + 5000;
   while (true) {

@@ -93,3 +93,16 @@ test('required fields and ask timeouts reject invalid values', () => {
   assert.equal(timeoutMs(0.5), 500);
   for (const value of [0, -1, 3601, NaN, Infinity]) assert.throws(() => timeoutMs(value), /timeoutSec/);
 });
+
+test('Pi file paths expand home and cwd, and file commands accept quoted paths', async () => {
+  const { homedir } = await import('node:os');
+  const { resolveFilePath, parseFileCommand } = await import('../pi/helpers.js');
+  assert.equal(resolveFilePath('~/photo.png', '/work'), `${homedir()}/photo.png`);
+  assert.equal(resolveFilePath('~', '/work'), homedir());
+  assert.equal(resolveFilePath('images/photo.png', '/work'), '/work/images/photo.png');
+  assert.equal(resolveFilePath('/photo.png', '/work'), '/photo.png');
+  assert.deepEqual(parseFileCommand('"my photo.png" hello there'), { path: 'my photo.png', message: 'hello there' });
+  assert.deepEqual(parseFileCommand("'my photo.png'"), { path: 'my photo.png', message: '' });
+  assert.deepEqual(parseFileCommand('photo.png hello'), { path: 'photo.png', message: 'hello' });
+  assert.throws(() => parseFileCommand('"unclosed'), /quote/);
+});

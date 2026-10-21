@@ -1,15 +1,19 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
+import { mkdtemp, rm, readFile, writeFile, stat, readdir, utimes } from 'node:fs/promises';
+import { createServer, createConnection } from 'node:net';
+import { randomUUID } from 'node:crypto';
+import { hashFile } from '../src/files.js';
+import { readFrames, writeFrame } from '../src/ndjson.js';
+import { peerRequest } from '../src/exchange/http.js';
 import { createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { TelephoneClient } from '../src/client.js';
 import { createExchange } from '../src/exchange/exchange.js';
-import { DEFAULT_CONFIG, saveConfig } from '../src/config.js';
+import { DEFAULT_CONFIG, paths, saveConfig } from '../src/config.js';
 import type { IdentityProvider, MachineIdentity } from '../src/identity.js';
-import type { InboundMessage } from '../src/protocol.js';
+import type { Config, InboundMessage } from '../src/protocol.js';
 
 // Any unexpected auto-spawn must also remain local-only.
 process.env.PI_TELEPHONE_NETWORK = 'off';
@@ -36,7 +40,7 @@ async function ports(): Promise<[number, number]> {
   await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve()))));
   return [numbers[0], numbers[1]];
 }
-async function setup(t: TestContext, differentLogin = false) {
+async function setup(t: TestContext, differentLogin = false, config: Partial<Config> = {}) {
   const root = await mkdtemp('/tmp/pi-tel-');
   const homeA = `${root}/a`, homeB = `${root}/b`;
   const [portA, portB] = await ports();
@@ -48,8 +52,8 @@ async function setup(t: TestContext, differentLogin = false) {
   const { mkdir } = await import('node:fs/promises');
   await mkdir(homeA); await mkdir(homeB);
   // The listener override and the configured peer port differ only in this loopback fixture.
-  await saveConfig(homeA, { ...DEFAULT_CONFIG, port: portB });
-  await saveConfig(homeB, { ...DEFAULT_CONFIG, port: portA });
+  await saveConfig(homeA, { ...DEFAULT_CONFIG, ...config, port: portB });
+  await saveConfig(homeB, { ...DEFAULT_CONFIG, ...config, port: portA });
   let clock = Date.now();
   const optsA = { home: homeA, identity: identityA, port: portA, listenHost: '127.0.0.1', now: () => clock };
   const optsB = { home: homeB, identity: identityB, port: portB, listenHost: '127.0.0.1', now: () => clock };
@@ -69,7 +73,7 @@ async function setup(t: TestContext, differentLogin = false) {
   const a = await client(homeA, 'alice');
   const b = await client(homeB, 'bob');
   return {
-    a, b, alice, bob, homeA, homeB, portB, client, identityB,
+    a, b, alice, bob, homeA, homeB, portA, portB, client, identityB,
     advance(ms: number) { clock += ms; },
     async stopB() { await exchangeB.stop(); },
     async restartA() { await exchangeA.stop(); exchangeA = createExchange(optsA); await exchangeA.start(); },
@@ -263,4 +267,213 @@ test('hostile peer directory fields and error text are not relayed', async t => 
     ]);
     await assert.rejects(f.a.phone.send({ to: 'valid@beta', text: 'Hello' }), { code: 'unreachable', message: 'Peer request failed' });
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+const png = Buffer.from('89504e470d0a1a0a00010203', 'hex');
+async function sourceFile(home: string, name = 'file.bin', bytes = Buffer.from([0, 255, 1, 2])) {
+  const path = `${home}/${name}`;
+  await writeFile(path, bytes);
+  return path;
+}
+
+test('files a: local send saves identical bytes privately under the session and message id', async t => {
+  const f = await setup(t);
+  const receiver = await f.client(f.homeA, 'receiver');
+  const path = await sourceFile(f.homeA);
+  const sent = await f.a.phone.send({ to: 'receiver', text: '', files: [path] });
+  const file = receiver.messages[0].files![0];
+  assert.equal(file.path, `${f.homeA}/inbox/receiver/${sent.id}/file.bin`);
+  assert.deepEqual(await readFile(file.path), await readFile(path));
+  assert.equal((await stat(file.path)).mode & 0o777, 0o600);
+  assert.equal((await stat(`${f.homeA}/inbox/receiver/${sent.id}`)).mode & 0o777, 0o700);
+  assert.equal(sent.files![0].sha256, (await hashFile(path)).sha256);
+});
+
+test('files b: cross-exchange PNG and binary send, then ask and reply with files', async t => {
+  const f = await setup(t, true);
+  await f.b.phone.setTrustedUsers({ add: [f.alice.login] });
+  await f.b.phone.update({ allow: ['*'] });
+  const image = await sourceFile(f.homeA, 'photo.png', png), binary = await sourceFile(f.homeA);
+  await f.a.phone.send({ to: 'bob@beta', text: 'Files', files: [image, binary] });
+  assert.deepEqual(f.b.messages[0].files!.map(file => file.mime), ['image/png', 'application/octet-stream']);
+  for (const [index, file] of f.b.messages[0].files!.entries()) assert.deepEqual(await readFile(file.path), await readFile([image, binary][index]));
+  const answer = await sourceFile(f.homeB, 'answer.bin');
+  f.b.handle(async message => { await f.b.phone.send({ replyTo: message.id, text: '', files: [answer] }); });
+  const result = await f.a.phone.ask({ to: 'bob@beta', text: 'Please answer', files: [image], timeoutMs: 3000 });
+  assert.equal(result.reply.files![0].sha256, (await hashFile(answer)).sha256);
+  assert.deepEqual(await readFile(result.reply.files![0].path), await readFile(answer));
+  assert.equal(result.reply.isReplyToOwnCall, true);
+});
+
+test('files c: an untrusted offer is refused without staging', async t => {
+  const f = await setup(t, true);
+  await f.b.phone.update({ allow: ['*'] });
+  await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [await sourceFile(f.homeA)] }), { code: 'not_trusted' });
+  assert.deepEqual(await readdir(`${f.homeB}/inbox/.incoming`), []);
+  assert.equal((await f.b.phone.getConfig()).inboxBytes, 0);
+});
+
+test('files d: a total over maxFileBytes is refused before upload', async t => {
+  const f = await setup(t, false, { maxFileBytes: 3 });
+  await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [await sourceFile(f.homeA)] }), { code: 'too_large' });
+  assert.deepEqual(await readdir(`${f.homeB}/inbox/.incoming`), []);
+  assert.equal((await f.b.phone.getConfig()).inboxBytes, 0);
+  assert.equal(f.b.messages.length, 0);
+});
+
+test('files e: wrong raw PUT bytes reject the checksum and remove staging', async t => {
+  const f = await setup(t);
+  const path = await sourceFile(f.homeA);
+  const { size, sha256 } = await hashFile(path);
+  const offer = await peerRequest<{ upload: string }>({ host: '127.0.0.1', port: f.portB, fromPort: f.portA, path: '/v1/offer', timeout: 3000, body: {
+    proto: 1, id: randomUUID(), from: { session: 'alice', harness: 'pi' }, fromPort: f.portA, to: { session: 'bob' }, text: '', expectReply: false, sentAt: new Date().toISOString(),
+    files: [{ name: 'file.bin', size, sha256, mime: 'application/octet-stream' }],
+  } });
+  async function* wrong() { yield Buffer.alloc(size); }
+  await assert.rejects(peerRequest({ host: '127.0.0.1', port: f.portB, fromPort: f.portA, path: `/v1/upload/${offer.upload}`, timeout: 3000, upload: wrong(), size }), { code: 'checksum_mismatch' });
+  assert.deepEqual(await readdir(`${f.homeB}/inbox/.incoming`), []);
+  assert.equal((await f.b.phone.getConfig()).inboxBytes, 0);
+  assert.equal(f.b.messages.length, 0);
+});
+
+test('files: receiver detects MIME from stored bytes instead of the declared type', async t => {
+  const f = await setup(t);
+  const bytes = Buffer.from('RIFFxxxxWAVE');
+  const path = await sourceFile(f.homeA, 'audio.png', bytes);
+  const { size, sha256 } = await hashFile(path);
+  const offer = await peerRequest<{ upload: string }>({ host: '127.0.0.1', port: f.portB, fromPort: f.portA, path: '/v1/offer', timeout: 3000, body: {
+    proto: 1, id: randomUUID(), from: { session: 'alice', harness: 'pi' }, fromPort: f.portA, to: { session: 'bob' }, text: '', expectReply: false, sentAt: new Date().toISOString(),
+    files: [{ name: 'audio.png', size, sha256, mime: 'image/png' }],
+  } });
+  async function* upload() { yield bytes; }
+  await peerRequest({ host: '127.0.0.1', port: f.portB, fromPort: f.portA, path: `/v1/upload/${offer.upload}`, timeout: 3000, upload: upload(), size });
+  assert.equal(f.b.messages[0].files![0].mime, 'audio/wav');
+  assert.deepEqual(await readFile(f.b.messages[0].files![0].path), bytes);
+});
+
+test('files f: a recipient without hello features still receives text but not files', async t => {
+  const f = await setup(t);
+  const socket = createConnection(paths(f.homeA).socket);
+  t.after(() => socket.destroy());
+  await once(socket, 'connect');
+  const messages: unknown[] = [];
+  const pending = new Map<string, (value: unknown) => void>();
+  readFrames(socket, value => {
+    const frame = value as { t: string; rid: string; message: InboundMessage };
+    if (frame.t === 'deliver') { messages.push(frame.message); writeFrame(socket, { t: 'ack', id: frame.message.id, accepted: true }); }
+    else pending.get(frame.rid)?.(value);
+  });
+  async function request(body: object) {
+    const rid = randomUUID();
+    const result = new Promise(resolve => pending.set(rid, resolve));
+    writeFrame(socket, { rid, ...body });
+    return result;
+  }
+  await request({ t: 'hello', proto: 1, client: { harness: 'pi', version: '0.1.3', pid: process.pid } });
+  await request({ t: 'register', session: { key: 'old', name: 'old', harness: 'pi', cwd: '/', hostPid: process.pid }, allow: ['owner'] });
+  await assert.rejects(f.a.phone.send({ to: 'old', text: '', files: [await sourceFile(f.homeA)] }), { code: 'recipient_unsupported' });
+  await f.a.phone.send({ to: 'old', text: 'Still works' });
+  assert.equal(messages.length, 1);
+});
+
+test('files g: a 0.1.3 peer without features refuses files before an offer', async t => {
+  const f = await setup(t);
+  await f.b.phone.close(); await f.stopB();
+  const requests: string[] = [];
+  const server = createHttpServer((req, res) => {
+    requests.push(req.url!);
+    res.end(JSON.stringify({ proto: 1, version: '0.1.3', machine: f.bob }));
+  });
+  await new Promise<void>(resolve => server.listen(f.portB, '127.0.0.1', resolve));
+  try {
+    await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [await sourceFile(f.homeA)] }), error =>
+      error instanceof Error && 'code' in error && error.code === 'peer_unsupported' && /0.1.3/.test(error.message));
+    assert.deepEqual(requests, ['/v1/hello']);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('files: invalid peer limits are unsupported and never appear in error text', async t => {
+  const f = await setup(t);
+  await f.b.phone.close(); await f.stopB();
+  const requests: string[] = [];
+  let limits: unknown;
+  const server = createHttpServer((req, res) => {
+    requests.push(req.url!);
+    res.end(JSON.stringify({ proto: 1, version: 'peer-version', features: ['files'], limits, machine: f.bob }));
+  });
+  await new Promise<void>(resolve => server.listen(f.portB, '127.0.0.1', resolve));
+  try {
+    const path = await sourceFile(f.homeA);
+    for (limits of [
+      { maxFileBytes: 'peer-byte-limit', maxFiles: 'peer-count-limit' },
+      { maxFileBytes: 1.5, maxFiles: 'peer-count-limit' },
+      { maxFileBytes: 50000000, maxFiles: 1.5 },
+      { maxFileBytes: 0, maxFiles: 10 },
+      { maxFileBytes: Number.MAX_SAFE_INTEGER + 1, maxFiles: 10 },
+    ]) {
+      f.advance(60001);
+      await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [path] }), error => {
+        assert.ok(error instanceof Error && 'code' in error);
+        assert.equal(error.code, 'peer_unsupported');
+        assert.doesNotMatch(error.message, /peer-version|peer-byte-limit|peer-count-limit/);
+        return true;
+      });
+    }
+    assert.deepEqual(requests, Array(5).fill('/v1/hello'));
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('files: inbox usage recovers after a message directory is removed by hand', async t => {
+  const f = await setup(t, false, { inboxMaxBytes: 4 });
+  const path = await sourceFile(f.homeA);
+  const sent = await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+  await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [path] }), { code: 'inbox_full' });
+  await rm(`${f.homeB}/inbox/bob/${sent.id}`, { recursive: true });
+  f.advance(60001);
+  await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+  assert.equal((await f.b.phone.getConfig()).inboxBytes, 4);
+});
+
+test('files: deleting the whole inbox still allows file sends', async t => {
+  const f = await setup(t, false, { inboxMaxBytes: 4 });
+  const path = await sourceFile(f.homeA);
+  await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+  for (const elapsed of [60001, 0]) {
+    await rm(`${f.homeB}/inbox`, { recursive: true });
+    f.advance(elapsed);
+    await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+    assert.deepEqual(await readFile(f.b.messages.at(-1)!.files![0].path), await readFile(path));
+    assert.equal((await stat(`${f.homeB}/inbox/.incoming`)).mode & 0o777, 0o700);
+    assert.equal((await f.b.phone.getConfig()).inboxBytes, 4);
+  }
+});
+
+test('files h: inbox quota and retention by message directory mtime', async t => {
+  const f = await setup(t, false, { inboxMaxBytes: 4, inboxDays: 1 });
+  const path = await sourceFile(f.homeA);
+  const sent = await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+  await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: '', files: [path] }), { code: 'inbox_full' });
+  const directory = `${f.homeB}/inbox/bob/${sent.id}`;
+  const old = new Date(Date.now() - 2 * 86400000);
+  await utimes(directory, old, old);
+  f.advance(60001);
+  await f.a.phone.send({ to: 'bob@beta', text: '', files: [path] });
+  await assert.rejects(stat(directory), { code: 'ENOENT' });
+  assert.equal((await f.b.phone.getConfig()).inboxBytes, 4);
+});
+
+test('files i: an old exchange hello causes exchange_outdated without sending', async t => {
+  const home = await mkdtemp('/tmp/pi-tel-old-');
+  const requests: string[] = [];
+  const server = createServer(socket => readFrames(socket, value => {
+    const frame = value as { t: string; rid: string };
+    requests.push(frame.t);
+    writeFrame(socket, { t: 'ok', rid: frame.rid, exchange: { proto: 1, version: '0.1.3', machine: { fqdn: 'old', short: 'old', login: '' }, listening: null } });
+  }));
+  await new Promise<void>(resolve => server.listen(paths(home).socket, resolve));
+  const phone = new TelephoneClient({ home, harness: 'pi', version: 'test', onMessage: async () => ({ accepted: true }) });
+  t.after(async () => { await phone.close(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(home, { recursive: true, force: true }); });
+  await assert.rejects(phone.send({ to: 'old', text: '', files: [`${home}/file`] }), error =>
+    error instanceof Error && 'code' in error && error.code === 'exchange_outdated' && /0.1.3/.test(error.message));
+  assert.deepEqual(requests, ['hello']);
 });

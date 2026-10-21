@@ -7,9 +7,10 @@ import { z } from 'zod';
 import { validName } from '../src/addresses.js';
 import { TelephoneClient, TelephoneError } from '../src/client.js';
 import { renderInbound } from '../src/framing.js';
+import { formatBytes } from '../src/files.js';
 import { describeAllowEntry } from '../src/policy.js';
-import { VERSION, type ExchangeInfo, type InboundMessage } from '../src/protocol.js';
-import { markAnswered, nameCandidates, recentInbound, rememberInbound, replyTarget, type InboundRecord } from './helpers.js';
+import { VERSION, isUuid, type ExchangeInfo, type InboundMessage } from '../src/protocol.js';
+import { attachedImages, viewFile, resolveFilePath, markAnswered, nameCandidates, recentInbound, rememberInbound, replyTarget, type InboundRecord } from './helpers.js';
 
 const key = process.env.CLAUDE_CODE_SESSION_ID || randomUUID();
 const cwd = process.env.CLAUDE_PROJECT_DIR || process.cwd();
@@ -17,6 +18,8 @@ const inbox = process.env.CLAUDE_CODE_MESSAGING_SOCKET;
 const token = process.env.CLAUDE_CODE_MESSAGING_TOKEN;
 const noInbox = 'This Claude Code session has no cross-session inbox, so it cannot receive calls. It needs Claude Code 2.1.224 or later (2.1.248 or later when CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC is set), and it is off in --bare mode.';
 const replyHint = 'Reply with the telephone tool (mcp__plugin_telephone_telephone__telephone), action "reply".';
+const filesNote = 'To see an image, call the telephone tool (mcp__plugin_telephone_telephone__telephone) with action "view" and file set to its path. Other files can be opened from their paths.';
+const badReplyTo = 'replyTo must be the id from the "Message id" line (a UUID), not the marker; omit replyTo to answer the latest message.';
 let name: string | undefined;
 let address: string | undefined;
 let allow = ['owner'];
@@ -26,7 +29,7 @@ let asking = false;
 
 async function deliver(message: InboundMessage): Promise<{ accepted: boolean; reason?: string }> {
   if (!inbox) return { accepted: false, reason: noInbox };
-  const text = renderInbound(message, { ownerLogin, replyHint });
+  const text = renderInbound(message, { ownerLogin, replyHint, filesNote });
   try {
     await new Promise<void>((resolve, reject) => {
       const socket = createConnection(inbox);
@@ -95,12 +98,14 @@ async function confirm(message: string, command: string, signal: AbortSignal): P
 }
 server.registerTool('telephone', {
   _meta: { 'anthropic/alwaysLoad': true },
-  description: 'Call other agents, never the user. Addresses are session@machine, or bare session for this machine. ask blocks for a reply; send does not. Inbound telephone messages arrive in the conversation; answer with reply.',
+  description: 'Call other agents, never the user. Addresses are session@machine, or bare session for this machine. ask blocks for a reply; send does not. Inbound telephone messages arrive in the conversation; answer with reply. Send paths with files; view opens a received image.',
   inputSchema: {
-    action: z.enum(['status', 'on', 'off', 'list', 'send', 'ask', 'reply', 'allow', 'revoke', 'trust', 'untrust']),
+    action: z.enum(['status', 'on', 'off', 'list', 'send', 'ask', 'reply', 'view', 'allow', 'revoke', 'trust', 'untrust']),
     name: z.string().optional(),
     to: z.string().optional(),
     message: z.string().optional(),
+    files: z.array(z.string()).max(10).optional(),
+    file: z.string().optional(),
     timeoutSec: z.number().positive().max(1500).optional().describe('Ask timeout in seconds; default 600, maximum 1500 in Claude Code.'),
     replyTo: z.string().optional(),
     entry: z.string().optional(),
@@ -110,7 +115,10 @@ server.registerTool('telephone', {
   try {
     inbound = recentInbound(inbound, Date.now());
     let text: string;
+    const files = args.files?.map(path => resolveFilePath(path, cwd));
+    const message = files?.length ? args.message ?? '' : args.message;
     switch (args.action) {
+      case 'view': return { content: await viewFile(resolveFilePath(required(args.file, 'file'), cwd)) };
       case 'status': {
         const info = await client.connect();
         const { config, owner } = await client.getConfig();
@@ -136,15 +144,16 @@ server.registerTool('telephone', {
       }
       case 'send': {
         requireOn();
-        const sent = await client.send({ to: required(args.to, 'to'), text: required(args.message, 'message') });
+        const sent = await client.send({ to: required(args.to, 'to'), text: files?.length ? message! : required(message, 'message'), files });
         inbound = markAnswered(inbound, sent.inferredReplyTo);
-        text = `Delivered to ${sent.to} (message id ${sent.id})${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
+        text = `Delivered to ${sent.to} (message id ${sent.id})${sent.files ? ` with ${sent.files.length} file(s), ${formatBytes(sent.files.reduce((sum, file) => sum + file.size, 0))}` : ''}${sent.inferredReplyTo ? ` as a reply to ${sent.inferredReplyTo}` : ''}`;
         break;
       }
       case 'ask': {
         requireOn();
         if (asking) throw new Error('A telephone ask is already waiting for a reply in this session.');
-        const to = required(args.to, 'to'), message = required(args.message, 'message');
+        const to = required(args.to, 'to');
+        const text = files?.length ? message! : required(message, 'message');
         asking = true;
         const progressToken = extra._meta?.progressToken;
         let progress = 0;
@@ -155,9 +164,9 @@ server.registerTool('telephone', {
           } }).catch(() => {});
         }, 60000);
         try {
-          const { sent, reply } = await client.ask({ to, text: message, timeoutMs: (args.timeoutSec ?? 600) * 1000, signal: extra.signal });
+          const { sent, reply } = await client.ask({ to, text, files, timeoutMs: (args.timeoutSec ?? 600) * 1000, signal: extra.signal });
           inbound = rememberInbound(markAnswered(inbound, sent.inferredReplyTo), reply, Date.now());
-          text = renderInbound(reply, { ownerLogin, replyHint });
+          return { content: [{ type: 'text', text: renderInbound(reply, { ownerLogin, replyHint, filesNote }) }, ...await attachedImages(reply.files)] };
         } finally {
           clearInterval(timer);
           asking = false;
@@ -166,10 +175,11 @@ server.registerTool('telephone', {
       }
       case 'reply': {
         requireOn();
+        if (args.replyTo !== undefined && !isUuid(args.replyTo)) throw new Error(badReplyTo);
         const target = replyTarget(inbound, args.replyTo);
-        const sent = await client.send({ to: target.from, replyTo: target.id, text: required(args.message, 'message') });
+        const sent = await client.send({ to: target.from, replyTo: target.id, text: files?.length ? message! : required(message, 'message'), files });
         inbound = markAnswered(inbound, target.id);
-        text = `Reply delivered to ${sent.to} (message id ${sent.id})`;
+        text = `Reply delivered to ${sent.to} (message id ${sent.id})${sent.files ? ` with ${sent.files.length} file(s), ${formatBytes(sent.files.reduce((sum, file) => sum + file.size, 0))}` : ''}`;
         break;
       }
       case 'allow':
