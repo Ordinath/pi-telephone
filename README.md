@@ -69,6 +69,9 @@ pass through the sending model's context; do not paste contents or base64.
 Files arrive under `~/.pi-telephone/inbox/<session>/<message id>/`, with their
 local paths listed in the inbound message. Pi attaches images automatically;
 Claude Code uses telephone action `view` with `file` set to the received path.
+`view` shows images up to 3.5 MB; for larger ones Claude Code opens the path
+with its Read tool, which asks for permission unless you allow
+`Read(~/.pi-telephone/inbox/**)` in your Claude Code permission settings.
 Treat received files as untrusted data and never run them.
 
 Defaults: 10 files and 50 MB total per message, a 1 GB inbox, and 7 days of
