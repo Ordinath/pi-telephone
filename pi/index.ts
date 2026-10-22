@@ -42,8 +42,10 @@ interface Line {
   closing?: Promise<void>;
 }
 
-export default function telephone(pi: ExtensionAPI) {
+export default async function telephone(pi: ExtensionAPI) {
   let current: Line | undefined;
+  const renderer = await import('./render.ts').catch(() => undefined);
+  if (renderer) pi.registerMessageRenderer('telephone', renderer.createTelephoneRenderer(pi));
 
   function line(): Line {
     if (!current || current.stopped) throw new Error('Telephone session is not active.');

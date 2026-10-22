@@ -1,7 +1,7 @@
 export const PROTO_VERSION = 1;
 export const FEATURES = ['files'];
 declare const __PACKAGE_VERSION__: string;
-export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.2.0' : __PACKAGE_VERSION__;
+export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.2.1' : __PACKAGE_VERSION__;
 export type Harness = 'pi' | 'claude-code' | 'cli';
 export type SessionStatus = 'idle' | 'busy';
 export interface MachineIdentity {
