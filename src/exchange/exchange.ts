@@ -327,8 +327,9 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           });
         } else {
           const cached = discovery.get(route.machine.fqdn);
+          // No short connect limit here, as for text: an idle relayed Tailscale path can take seconds to connect.
           const hello = cached?.hello && cached.at > now() - 60000 ? cached.hello
-            : await remote<NetworkHello>(route.ip!, route.port, '/v1/hello', 5000, undefined, 1500);
+            : await remote<NetworkHello>(route.ip!, route.port, '/v1/hello', 15000);
           if (hello !== cached?.hello) discovery.set(route.machine.fqdn, { at: now(), hasExchange: true, hello });
           const version = typeof hello.version === 'string' && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : 'unknown';
           if (!Array.isArray(hello.features) || !hello.features.includes('files')) throw new TelephoneError('peer_unsupported', `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
@@ -337,13 +338,13 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every(value => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError('peer_unsupported', 'Peer does not advertise valid file limits.');
           const total = files.reduce((sum, file) => sum + file.size, 0);
           if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError('too_large', `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
-          const offered = await remote<{ upload: string }>(route.ip!, route.port, '/v1/offer', 15000, message, 1500);
+          const offered = await remote<{ upload: string }>(route.ip!, route.port, '/v1/offer', 15000, message);
           if (!isUuid(offered.upload)) throw new TelephoneError('unreachable', 'Invalid upload id');
           async function* bytes() {
             for (const file of request.files!) yield* createReadStream(file.path);
           }
           await peerRequest({ host: route.ip!, port: route.port, path: `/v1/upload/${offered.upload}`, timeout: 15 * 60000,
-            connectTimeout: 1500, fromPort: options.port, localAddress: listening?.address, upload: bytes(), size: total });
+            fromPort: options.port, localAddress: listening?.address, upload: bytes(), size: total });
         }
       } else if (route.local) await deliver(message, self, true);
       else await remote(route.ip!, route.port, '/v1/deliver', 8000, message);

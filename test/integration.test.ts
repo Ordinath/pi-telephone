@@ -1,12 +1,12 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile, stat, readdir, utimes } from 'node:fs/promises';
-import { createServer, createConnection } from 'node:net';
+import { createServer, createConnection, type NetConnectOpts, type Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { hashFile } from '../src/files.js';
 import { readFrames, writeFrame } from '../src/ndjson.js';
 import { peerRequest } from '../src/exchange/http.js';
-import { createServer as createHttpServer } from 'node:http';
+import { Agent, createServer as createHttpServer } from 'node:http';
 import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { TelephoneClient } from '../src/client.js';
@@ -303,6 +303,27 @@ test('files b: cross-exchange PNG and binary send, then ask and reply with files
   assert.equal(result.reply.files![0].sha256, (await hashFile(answer)).sha256);
   assert.deepEqual(await readFile(result.reply.files![0].path), await readFile(answer));
   assert.equal(result.reply.isReplyToOwnCall, true);
+});
+
+test('files: a send waits for a peer whose connection takes 2 s to open, as on an idle relayed path', async t => {
+  const f = await setup(t);
+  await f.a.phone.directory();
+  // The peer's hello is now cached, so the next connection to beta is the offer's; open it 2 s late.
+  type CreateConnection = (options: NetConnectOpts & { port?: number }, callback: (error: Error | null, socket?: Socket) => void) => Socket | undefined;
+  const agent = Agent.prototype as unknown as { createConnection: CreateConnection };
+  const original = agent.createConnection;
+  let delayed = 0;
+  agent.createConnection = function (this: unknown, options, callback) {
+    if (delayed || options.port !== f.portB) return original.call(this, options, callback);
+    delayed++;
+    setTimeout(() => callback(null, createConnection(options)), 2000);
+    return undefined;
+  };
+  t.after(() => { agent.createConnection = original; });
+  const path = await sourceFile(f.homeA);
+  await f.a.phone.send({ to: 'bob@beta', text: 'Slow path', files: [path] });
+  assert.equal(delayed, 1);
+  assert.deepEqual(await readFile(f.b.messages[0].files![0].path), await readFile(path));
 });
 
 test('files c: an untrusted offer is refused without staging', async t => {

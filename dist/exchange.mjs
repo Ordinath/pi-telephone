@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.1" : "0.2.1";
+var VERSION = false ? "0.2.2" : "0.2.2";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -915,7 +915,7 @@ function createExchange(options) {
           });
         } else {
           const cached = discovery.get(route.machine.fqdn);
-          const hello = cached?.hello && cached.at > now() - 6e4 ? cached.hello : await remote(route.ip, route.port, "/v1/hello", 5e3, void 0, 1500);
+          const hello = cached?.hello && cached.at > now() - 6e4 ? cached.hello : await remote(route.ip, route.port, "/v1/hello", 15e3);
           if (hello !== cached?.hello) discovery.set(route.machine.fqdn, { at: now(), hasExchange: true, hello });
           const version = typeof hello.version === "string" && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : "unknown";
           if (!Array.isArray(hello.features) || !hello.features.includes("files")) throw new TelephoneError("peer_unsupported", `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
@@ -924,7 +924,7 @@ function createExchange(options) {
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every((value) => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError("peer_unsupported", "Peer does not advertise valid file limits.");
           const total = files.reduce((sum, file) => sum + file.size, 0);
           if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError("too_large", `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
-          const offered = await remote(route.ip, route.port, "/v1/offer", 15e3, message, 1500);
+          const offered = await remote(route.ip, route.port, "/v1/offer", 15e3, message);
           if (!isUuid(offered.upload)) throw new TelephoneError("unreachable", "Invalid upload id");
           async function* bytes() {
             for (const file of request2.files) yield* createReadStream2(file.path);
@@ -934,7 +934,6 @@ function createExchange(options) {
             port: route.port,
             path: `/v1/upload/${offered.upload}`,
             timeout: 15 * 6e4,
-            connectTimeout: 1500,
             fromPort: options.port,
             localAddress: listening?.address,
             upload: bytes(),
