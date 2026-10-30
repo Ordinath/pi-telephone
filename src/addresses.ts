@@ -29,9 +29,11 @@ export function resolveMachine(value: string | undefined, self: MachineIdentity,
   if (!name || name === self.fqdn.toLowerCase() || name === self.short.toLowerCase()) return self;
   const exact = peers.find(peer => normalizeMachine(peer.fqdn) === name);
   if (exact) return exact;
-  const matches = peers.filter(peer => peer.online && peer.short.toLowerCase() === name);
+  const named = peers.filter(peer => peer.short.toLowerCase() === name);
+  const matches = named.filter(peer => peer.online);
   const running = matches.filter(peer => peer.hasExchange);
-  const candidates = running.length ? running : matches;
+  // Tailscale can report a reachable machine as offline, so a unique short name still resolves, as a full name does.
+  const candidates = running.length ? running : matches.length ? matches : named;
   if (candidates.length === 1) return candidates[0];
   const ipMatch = peers.find(peer => peer.ips.some(ip => ip.toLowerCase() === name));
   if (ipMatch) return ipMatch;

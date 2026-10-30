@@ -23,9 +23,10 @@ class StaticIdentity implements IdentityProvider {
   // Delays the next whois once, like a cold `tailscale whois` on a real Mac.
   whoisDelay = 0;
   extraPeers: (MachineIdentity & { online: boolean })[] = [];
+  otherOnline = true;
   constructor(private own: MachineIdentity, private other: MachineIdentity, private machines: Map<number, MachineIdentity>) {}
   async self() { return { ...this.own, ipv4: this.own.ips[0] }; }
-  async peers() { return [{ ...this.other, ips: ['127.0.0.1'], online: true }, ...this.extraPeers]; }
+  async peers() { return [{ ...this.other, ips: ['127.0.0.1'], online: this.otherOnline }, ...this.extraPeers]; }
   async whois(ip: string, hint?: { fromPort?: number }) {
     const delay = this.whoisDelay;
     this.whoisDelay = 0;
@@ -225,6 +226,17 @@ test('a reply by id uses the stored route when the sender\'s short machine name 
   assert.equal(f.a.messages[0].replyTo, sent.id);
   assert.equal(f.a.messages[0].isReplyToOwnCall, true);
   await assert.rejects(f.b.phone.send({ to: 'alice@alpha', text: 'Fresh call' }), { code: 'unknown_machine' });
+});
+
+test('a reachable machine that Tailscale reports offline still resolves by its unique short name', async t => {
+  const f = await setup(t);
+  f.identityB.otherOnline = false;
+  await f.a.phone.send({ to: 'bob@beta', text: 'Question' });
+  const call = f.b.messages[0];
+  await f.b.phone.send({ to: call.from.address, replyTo: call.id, text: 'Answer' });
+  await f.b.phone.send({ to: 'alice@alpha', text: 'Fresh call' });
+  await until(() => f.a.messages.length === 2);
+  assert.deepEqual(f.a.messages.map(message => [message.text, message.isReplyToOwnCall]), [['Answer', true], ['Fresh call', false]]);
 });
 
 test('j: send infers replyTo for the only unanswered inbound call', async t => {

@@ -26,6 +26,9 @@ test('slugify, validate names and resolve addresses without offline short-label 
   assert.throws(() => resolveMachine('workbench', self, both), error => error instanceof Error && /workbench.tailaaaa.ts.net.*workbench.tailbbbb.ts.net/.test(error.message));
   both[1] = { ...both[1], hasExchange: true };
   assert.equal(resolveMachine('workbench', self, both), both[1]);
+  const offline: Peer[] = peers.map(peer => ({ ...peer, online: false }));
+  assert.equal(resolveMachine('workbench', self, [offline[1]]), offline[1]);
+  assert.throws(() => resolveMachine('workbench', self, offline), { code: 'unknown_machine' });
   assert.equal(displayMachine(peers[1], self, peers.map(peer => ({ ...peer, hasExchange: true }))), 'workbench');
   assert.equal(displayMachine(both[1], self, both.map(peer => ({ ...peer, hasExchange: true }))), peers[1].fqdn);
 });
