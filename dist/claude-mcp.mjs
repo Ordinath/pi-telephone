@@ -36481,7 +36481,7 @@ var StdioServerTransport = class {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.2" : "0.2.2";
+var VERSION = false ? "0.2.3" : "0.2.3";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);

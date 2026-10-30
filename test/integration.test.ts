@@ -22,9 +22,10 @@ process.env.PI_TELEPHONE_IDLE_EXIT_MS = '100';
 class StaticIdentity implements IdentityProvider {
   // Delays the next whois once, like a cold `tailscale whois` on a real Mac.
   whoisDelay = 0;
+  extraPeers: (MachineIdentity & { online: boolean })[] = [];
   constructor(private own: MachineIdentity, private other: MachineIdentity, private machines: Map<number, MachineIdentity>) {}
   async self() { return { ...this.own, ipv4: this.own.ips[0] }; }
-  async peers() { return [{ ...this.other, ips: ['127.0.0.1'], online: true }]; }
+  async peers() { return [{ ...this.other, ips: ['127.0.0.1'], online: true }, ...this.extraPeers]; }
   async whois(ip: string, hint?: { fromPort?: number }) {
     const delay = this.whoisDelay;
     this.whoisDelay = 0;
@@ -209,6 +210,21 @@ test('i: message byte size, pair and overall rate limits are enforced', async t 
     for (let i = 0; i < (caller === 5 ? 19 : 20); i++) await extra.phone.send({ to: 'bob@beta', text: 'Overall limit' });
   }
   await assert.rejects(f.a.phone.send({ to: 'bob@beta', text: 'Overall full' }), { code: 'rate_limited' });
+});
+
+test('a reply by id uses the stored route when the sender\'s short machine name is ambiguous', async t => {
+  const f = await setup(t);
+  // Bob's tailnet lists a second reachable machine named alpha, so `alice@alpha` alone cannot be resolved.
+  f.identityB.extraPeers = [{ ...f.alice, fqdn: 'alpha.tailcccc.ts.net', ips: ['127.0.0.1'], online: true }];
+  const sent = await f.a.phone.send({ to: 'bob@beta', text: 'Question' });
+  const call = f.b.messages[0];
+  assert.equal(call.from.address, 'alice@alpha');
+  // Both adapters send the caller's address along with the id.
+  await f.b.phone.send({ to: call.from.address, replyTo: call.id, text: 'Answer' });
+  await until(() => f.a.messages.length === 1);
+  assert.equal(f.a.messages[0].replyTo, sent.id);
+  assert.equal(f.a.messages[0].isReplyToOwnCall, true);
+  await assert.rejects(f.b.phone.send({ to: 'alice@alpha', text: 'Fresh call' }), { code: 'unknown_machine' });
 });
 
 test('j: send infers replyTo for the only unanswered inbound call', async t => {

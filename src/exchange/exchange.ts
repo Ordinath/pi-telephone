@@ -5,7 +5,7 @@ import { chmod, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink 
 import { hostname } from 'node:os';
 import { createServer, type Socket } from 'node:net';
 import type { Server as HttpServer } from 'node:http';
-import { displayMachine, formatAddress, ipv4, parseAddress, resolveMachine, validName, type Peer } from '../addresses.js';
+import { displayMachine, formatAddress, ipv4, normalizeMachine, parseAddress, resolveMachine, validName, type Peer } from '../addresses.js';
 import { inboxPath, loadConfig, log, paths, prepareHome, saveConfig } from '../config.js';
 import { detectMime, formatBytes, hashFile, uniqueNames } from '../files.js';
 import type { IdentityProvider } from '../identity.js';
@@ -130,6 +130,13 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   }
   function sameRoute(a: Route, b: Route): boolean {
     return a.session === b.session && a.local === b.local && a.machine.fqdn.toLowerCase() === b.machine.fqdn.toLowerCase();
+  }
+  // True when `to` names this route's session and machine, so a reply needs no lookup that a duplicate machine name could break.
+  function addresses(to: string, route: Route): boolean {
+    const parsed = parseAddress(to);
+    if (parsed.session !== route.session) return false;
+    if (!parsed.machine) return route.local;
+    return [route.machine.fqdn, route.machine.short, route.ip].some(name => name && normalizeMachine(name) === parsed.machine);
   }
   function address(route: Route): string {
     const known = [...discovery].filter(([, entry]) => entry.hasExchange).map(([fqdn]) => ({ fqdn, short: fqdn.split('.')[0], login: '', ips: [], online: true, hasExchange: true }));
@@ -264,7 +271,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     if (typeof request.text !== 'string' || (request.expectReply !== undefined && typeof request.expectReply !== 'boolean')) throw new TelephoneError('invalid_request');
     if (Buffer.byteLength(request.text) > config.maxMessageBytes) throw new TelephoneError('too_large');
     const remembered = request.replyTo ? inbound.get(request.replyTo) : undefined;
-    if (!request.to && (!remembered || remembered.targetKey !== sender.session.key)) throw new TelephoneError('invalid_address', 'A destination or a received message id is required');
+    const own = remembered?.targetKey === sender.session.key ? remembered : undefined;
+    if (!request.to && !own) throw new TelephoneError('invalid_address', 'A destination or a received message id is required');
     const pending = { sessionKey: sender.session.key, cancelled: false };
     pendingSends.set(request.id, pending);
     let route: Route;
@@ -294,11 +302,11 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           files.push({ name: names[index], size: hashed.size, sha256: hashed.sha256, mime: detectMime(hashed.head, file.path) });
         }
       }
-      route = request.to ? await resolve(request.to) : remembered!.route;
+      route = own && (!request.to || addresses(request.to, own.route)) ? own.route : await resolve(request.to!);
     }
     finally { pendingSends.delete(request.id); }
     if (connection.registration !== sender || connection.socket.destroyed) throw new TelephoneError('not_registered');
-    if (remembered && remembered.targetKey === sender.session.key && (!request.to || sameRoute(route, remembered.route))) route = remembered.route;
+    if (own && sameRoute(route, own.route)) route = own.route;
     let replyTo = request.replyTo;
     let inferredReplyTo: string | undefined;
     if (!replyTo) {

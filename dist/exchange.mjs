@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.2" : "0.2.2";
+var VERSION = false ? "0.2.3" : "0.2.3";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -671,6 +671,12 @@ function createExchange(options) {
   function sameRoute(a, b) {
     return a.session === b.session && a.local === b.local && a.machine.fqdn.toLowerCase() === b.machine.fqdn.toLowerCase();
   }
+  function addresses(to, route) {
+    const parsed = parseAddress(to);
+    if (parsed.session !== route.session) return false;
+    if (!parsed.machine) return route.local;
+    return [route.machine.fqdn, route.machine.short, route.ip].some((name) => name && normalizeMachine(name) === parsed.machine);
+  }
   function address(route) {
     const known = [...discovery].filter(([, entry]) => entry.hasExchange).map(([fqdn]) => ({ fqdn, short: fqdn.split(".")[0], login: "", ips: [], online: true, hasExchange: true }));
     return formatAddress(route.session, displayMachine(route.machine, self, known));
@@ -841,7 +847,8 @@ function createExchange(options) {
     if (typeof request2.text !== "string" || request2.expectReply !== void 0 && typeof request2.expectReply !== "boolean") throw new TelephoneError("invalid_request");
     if (Buffer.byteLength(request2.text) > config.maxMessageBytes) throw new TelephoneError("too_large");
     const remembered = request2.replyTo ? inbound.get(request2.replyTo) : void 0;
-    if (!request2.to && (!remembered || remembered.targetKey !== sender.session.key)) throw new TelephoneError("invalid_address", "A destination or a received message id is required");
+    const own = remembered?.targetKey === sender.session.key ? remembered : void 0;
+    if (!request2.to && !own) throw new TelephoneError("invalid_address", "A destination or a received message id is required");
     const pending = { sessionKey: sender.session.key, cancelled: false };
     pendingSends.set(request2.id, pending);
     let route;
@@ -871,12 +878,12 @@ function createExchange(options) {
           files.push({ name: names2[index], size: hashed.size, sha256: hashed.sha256, mime: detectMime(hashed.head, file.path) });
         }
       }
-      route = request2.to ? await resolve2(request2.to) : remembered.route;
+      route = own && (!request2.to || addresses(request2.to, own.route)) ? own.route : await resolve2(request2.to);
     } finally {
       pendingSends.delete(request2.id);
     }
     if (connection.registration !== sender || connection.socket.destroyed) throw new TelephoneError("not_registered");
-    if (remembered && remembered.targetKey === sender.session.key && (!request2.to || sameRoute(route, remembered.route))) route = remembered.route;
+    if (own && sameRoute(route, own.route)) route = own.route;
     let replyTo = request2.replyTo;
     let inferredReplyTo;
     if (!replyTo) {
