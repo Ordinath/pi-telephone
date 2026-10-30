@@ -43,6 +43,7 @@ export class TelephoneClient extends EventEmitter {
   private async ensureExchange(): Promise<Socket> {
     const deadline = Date.now() + 5000;
     let spawned = false;
+    let failed: NodeJS.ErrnoException | undefined;
     let backoff = 25;
     while (!this.closed) {
       try {
@@ -58,11 +59,14 @@ export class TelephoneClient extends EventEmitter {
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
           const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
             ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'].includes(key) || key.startsWith('PI_TELEPHONE_')));
-          const child = spawn(process.execPath, [entry], { detached: true, stdio: 'ignore', env: { ...env, PI_TELEPHONE_HOME: this.home } });
-          child.on('error', () => {});
+          // A standalone Pi build (Bun or a Node single executable) is its own binary and cannot run a script, so use node from PATH.
+          const runtime = process.versions.bun || process.getBuiltinModule?.('node:sea')?.isSea() ? 'node' : process.execPath;
+          const child = spawn(runtime, [entry], { detached: true, stdio: 'ignore', env: { ...env, PI_TELEPHONE_HOME: this.home } });
+          child.on('error', error => { failed = error; });
           child.unref();
           spawned = true;
         }
+        if (failed) throw new TelephoneError('unreachable', failed.code === 'ENOENT' ? 'Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH' : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError('unreachable', 'Exchange did not start within 5 seconds');
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 500);

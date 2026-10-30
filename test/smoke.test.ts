@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,41 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { TelephoneClient } from '../src/client.js';
 import type { InboundMessage } from '../src/protocol.js';
 import { paths, isFsError } from '../src/config.js';
+
+test('inside a standalone Pi binary the daemon starts with node from PATH, and a missing node is reported at once', { timeout: 15000 }, async t => {
+  const home = await mkdtemp('/tmp/pi-tel-standalone-');
+  const previous = { execPath: process.execPath, path: process.env.PATH, network: process.env.PI_TELEPHONE_NETWORK, idle: process.env.PI_TELEPHONE_IDLE_EXIT_MS };
+  // Like Pi's Bun-compiled release binary: process.execPath is pi itself, which cannot run the daemon script.
+  Object.defineProperty(process.versions, 'bun', { value: '1.3.14', configurable: true });
+  process.execPath = '/usr/bin/false';
+  process.env.PATH = `${dirname(previous.execPath)}:${previous.path}`;
+  process.env.PI_TELEPHONE_NETWORK = 'off';
+  process.env.PI_TELEPHONE_IDLE_EXIT_MS = '200';
+  const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
+  const onMessage = async () => ({ accepted: true });
+  const client = new TelephoneClient({ harness: 'pi', version: 'test', home: `${home}/a`, exchangeEntry: entry, onMessage });
+  const other = new TelephoneClient({ harness: 'pi', version: 'test', home: `${home}/b`, exchangeEntry: entry, onMessage });
+  let pid: number | undefined;
+  t.after(async () => {
+    delete (process.versions as Record<string, string>).bun;
+    process.execPath = previous.execPath;
+    for (const [key, value] of [['PATH', previous.path], ['PI_TELEPHONE_NETWORK', previous.network], ['PI_TELEPHONE_IDLE_EXIT_MS', previous.idle]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+    }
+    await client.close();
+    await other.close();
+    if (pid) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; } }
+    await rm(home, { recursive: true, force: true });
+  });
+  await client.connect();
+  pid = Number(await readFile(paths(`${home}/a`).lock, 'utf8'));
+  assert.ok(pid > 0);
+  await mkdir(`${home}/empty-bin`);
+  process.env.PATH = `${home}/empty-bin`;
+  const started = Date.now();
+  await assert.rejects(other.connect(), { code: 'unreachable', message: /needs Node\.js 20 or newer on PATH/ });
+  assert.ok(Date.now() - started < 2000);
+});
 
 test('bundled daemon starts on demand, locks exclusively and removes private state on idle exit', { timeout: 15000 }, async t => {
   const home = await mkdtemp('/tmp/pi-tel-smoke-');

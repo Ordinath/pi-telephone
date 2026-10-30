@@ -74,7 +74,7 @@ function readFrames(socket, receive) {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.3" : "0.2.3";
+var VERSION = false ? "0.2.4" : "0.2.4";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -112,6 +112,7 @@ var TelephoneClient = class extends EventEmitter {
   async ensureExchange() {
     const deadline = Date.now() + 5e3;
     let spawned = false;
+    let failed;
     let backoff = 25;
     while (!this.closed) {
       try {
@@ -129,12 +130,15 @@ var TelephoneClient = class extends EventEmitter {
         if (!spawned) {
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
           const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key) || key.startsWith("PI_TELEPHONE_")));
-          const child = spawn(process.execPath, [entry], { detached: true, stdio: "ignore", env: { ...env, PI_TELEPHONE_HOME: this.home } });
-          child.on("error", () => {
+          const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
+          const child = spawn(runtime, [entry], { detached: true, stdio: "ignore", env: { ...env, PI_TELEPHONE_HOME: this.home } });
+          child.on("error", (error2) => {
+            failed = error2;
           });
           child.unref();
           spawned = true;
         }
+        if (failed) throw new TelephoneError("unreachable", failed.code === "ENOENT" ? "Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH" : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError("unreachable", "Exchange did not start within 5 seconds");
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 500);
