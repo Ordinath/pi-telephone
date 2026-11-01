@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.4" : "0.2.4";
+var VERSION = false ? "0.2.5" : "0.2.5";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -1037,7 +1037,7 @@ function createExchange(options) {
     prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine2.fqdn, { ip: sourceIP, port: body.fromPort });
     const accepted = await new Promise((resolve3) => {
-      const timer = setTimeout(() => finish(false), 5e3);
+      const timer = setTimeout(() => finish(void 0), 5e3);
       function finish(accepted2) {
         clearTimeout(timer);
         acks.delete(body.id);
@@ -1050,10 +1050,11 @@ function createExchange(options) {
         finish(false);
       }
     });
-    if (!accepted) {
+    if (accepted === false) {
       inbound.delete(body.id);
-      throw new TelephoneError("delivery_failed", "Recipient rejected the message or did not acknowledge it");
+      throw new TelephoneError("delivery_failed", "Recipient rejected the message or its connection closed");
     }
+    if (accepted === void 0) void log(options.home, "warn", `Unconfirmed ${body.id}: ${body.to.session} did not acknowledge within 5 s`);
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
   async function pruneInbox() {

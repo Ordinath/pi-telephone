@@ -425,13 +425,15 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     inbound.set(body.id, { at: now(), targetKey: key, route, id: body.id, expectReply: body.expectReply, answered: false });
     prune();
     if (!localCaller && sourceIP) peerEndpoints.set(machine.fqdn, { ip: sourceIP, port: body.fromPort });
-    const accepted = await new Promise<boolean>(resolve => {
-      const timer = setTimeout(() => finish(false), 5000);
-      function finish(accepted: boolean): void { clearTimeout(timer); acks.delete(body.id); resolve(accepted); }
+    const accepted = await new Promise<boolean | undefined>(resolve => {
+      // A session whose event loop is busy acknowledges late but still takes the message, so only a refusal or a closed connection fails.
+      const timer = setTimeout(() => finish(undefined), 5000);
+      function finish(accepted: boolean | undefined): void { clearTimeout(timer); acks.delete(body.id); resolve(accepted); }
       acks.set(body.id, { connection: target, finish });
       try { writeFrame(target.socket, { t: 'deliver', message }); } catch { finish(false); }
     });
-    if (!accepted) { inbound.delete(body.id); throw new TelephoneError('delivery_failed', 'Recipient rejected the message or did not acknowledge it'); }
+    if (accepted === false) { inbound.delete(body.id); throw new TelephoneError('delivery_failed', 'Recipient rejected the message or its connection closed'); }
+    if (accepted === undefined) void log(options.home, 'warn', `Unconfirmed ${body.id}: ${body.to.session} did not acknowledge within 5 s`);
     if (isReply && body.replyTo) waits.delete(body.replyTo);
   }
   async function pruneInbox(): Promise<void> {

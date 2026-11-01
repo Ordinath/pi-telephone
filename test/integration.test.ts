@@ -239,6 +239,21 @@ test('a reachable machine that Tailscale reports offline still resolves by its u
   assert.deepEqual(f.a.messages.map(message => [message.text, message.isReplyToOwnCall]), [['Answer', true], ['Fresh call', false]]);
 });
 
+test('a session that acknowledges after the deadline still gets the message, and only a refusal fails', { timeout: 15000 }, async t => {
+  const f = await setup(t);
+  // Like a session whose event loop is busy for seconds: it takes the message but acknowledges late.
+  f.b.handle(() => sleep(5500));
+  const sent = await f.a.phone.send({ to: 'bob@beta', text: 'Slow' });
+  assert.equal(f.b.messages[0].id, sent.id);
+  await f.b.phone.send({ to: f.b.messages[0].from.address, replyTo: sent.id, text: 'Answer' });
+  await until(() => f.a.messages.length === 1);
+  assert.equal(f.a.messages[0].isReplyToOwnCall, true);
+  const refusing = new TelephoneClient({ home: f.homeB, harness: 'pi', version: 'test', onMessage: async () => ({ accepted: false, reason: 'closing' }) });
+  t.after(() => refusing.close());
+  await refusing.register({ key: 'refusing-key', name: 'refusing', harness: 'pi', cwd: '/work/refusing', hostPid: process.pid });
+  await assert.rejects(f.a.phone.send({ to: 'refusing@beta', text: 'No' }), { code: 'delivery_failed' });
+});
+
 test('j: send infers replyTo for the only unanswered inbound call', async t => {
   const f = await setup(t);
   let inferred: string | undefined;
