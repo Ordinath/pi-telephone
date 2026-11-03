@@ -42,8 +42,18 @@ interface Line {
   closing?: Promise<void>;
 }
 
+// Another extension in the same pi process controls this session's telephone, for example to hand its name over to a fork:
+// pi.events.emit('pi-telephone:api', { version: 1, provide: api => { ... } }). Calls made before session_start wait for it.
+export interface TelephoneApiV1 {
+  status(): Promise<{ on: boolean; name?: string; address?: string }>;
+  on(name?: string): Promise<{ address: string }>;
+  off(): Promise<void>;
+}
+
 export default async function telephone(pi: ExtensionAPI) {
   let current: Line | undefined;
+  let started!: (session: Line) => void;
+  const ready = new Promise<Line>(resolve => { started = resolve; });
   const renderer = await import('./render.ts').catch(() => undefined);
   if (renderer) pi.registerMessageRenderer('telephone', renderer.createTelephoneRenderer(pi));
 
@@ -114,12 +124,13 @@ export default async function telephone(pi: ExtensionAPI) {
     return client(session);
   }
 
-  function turnOn(session: Line, name?: string): Promise<string> {
+  function turnOn(session: Line, name?: string, restoring = false): Promise<string> {
     return serial(session, async () => {
       const connection = client(session);
       const { owner } = await connection.getConfig();
       session.ownerLogin = owner;
-      const candidates = nameCandidates(name, session.state.name, pi.getSessionName() || basename(session.ctx.cwd));
+      const suffix = restoring ? session.ctx.sessionManager.getSessionId().replace(/-/g, '').slice(-6).toLowerCase() : undefined;
+      const candidates = nameCandidates(name, session.state.name, pi.getSessionName() || basename(session.ctx.cwd), suffix);
       for (const candidate of candidates) {
         try {
           session.address = session.address
@@ -131,7 +142,7 @@ export default async function telephone(pi: ExtensionAPI) {
           return `Telephone on: ${session.address}`;
         } catch (error) {
           if (!(error instanceof TelephoneError) || error.code !== 'name_taken') throw error;
-          if (candidate === candidates.at(-1)) throw new Error(`The telephone name ${candidate} is already used by another live session on this machine.`);
+          if (candidate === candidates.at(-1)) throw new TelephoneError('name_taken', `The telephone name ${candidate} is already used by another live session on this machine.`);
         }
       }
       throw new Error('No telephone name available.');
@@ -214,12 +225,39 @@ export default async function telephone(pi: ExtensionAPI) {
       asking: false, pending: Promise.resolve(), receiving: Promise.resolve(), stopped: false,
     };
     current = session;
+    started(session);
     ctx.ui.setStatus('telephone', undefined);
-    if (session.state.on) void turnOn(session).catch(error => {
+    const restored = session.state.name;
+    if (session.state.on) void turnOn(session, undefined, true).then(() => {
+      if (restored !== undefined && session.state.name !== restored) ctx.ui.notify(`The telephone name ${restored} is used by another live session, so this session answers as ${session.address}.`, 'info');
+    }, error => {
       if (session.stopped) return;
       session.state = { ...session.state, on: false };
       notifyError(ctx, error);
     });
+  });
+
+  async function active(): Promise<Line> {
+    const session = current ?? await ready;
+    if (session.stopped) throw new TelephoneError('not_active', 'Telephone session is not active.');
+    return session;
+  }
+  const api: TelephoneApiV1 = {
+    async status() {
+      const session = await active();
+      await session.pending;
+      return { on: session.state.on && !!session.address, name: session.state.name, address: session.address };
+    },
+    async on(name) {
+      const session = await active();
+      await turnOn(session, name);
+      return { address: session.address! };
+    },
+    async off() { await turnOff(await active()); },
+  };
+  pi.events.on('pi-telephone:api', data => {
+    const request = data as { version?: unknown; provide?: unknown } | undefined;
+    if (request?.version === 1 && typeof request.provide === 'function') request.provide(api);
   });
 
   pi.on('session_shutdown', async () => {

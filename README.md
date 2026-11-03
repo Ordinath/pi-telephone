@@ -53,6 +53,8 @@ Addresses are `session@machine`, for example `reviewer@bobs-mbp`; a bare `review
 
 Agents use the `telephone` tool: `send` delivers and returns, `ask` waits for the answer, `reply` answers an inbound message, `list` shows reachable sessions.
 
+A Pi session that turns its telephone back on at start, while another live session on the machine holds its name (for example a fork of it), answers as `<name>-<last 6 characters of its session id>` instead.
+
 Allowlist entries: `owner` (your own sessions, the default), `local` (this machine), `user:<login>` (every session of that Tailscale user), `<session>@<machine>` (`*` works in either part; a short machine name matches only inside your own tailnet), and `*` (anyone this machine trusts).
 
 ## Files
@@ -80,6 +82,23 @@ retention. Copy anything worth keeping. The exchange's `config.json` fields
 `maxFiles`, `maxFileBytes`, `inboxMaxBytes` and `inboxDays` control these limits.
 Both exchanges and receiving sessions need 0.2.0 or later for files; text
 messages still work with older versions.
+
+## From another Pi extension
+
+An extension in the same Pi process can control that session's telephone, for example to hand a name over to a fork and take it back later:
+
+```ts
+let telephone: TelephoneApiV1 | undefined;
+pi.events.emit('pi-telephone:api', { version: 1, provide: api => { telephone = api; } });
+await telephone?.on('assistant-main'); // turn on, or rename while on
+await telephone?.status();             // { on, name, address }
+await telephone?.off();
+```
+
+`provide` runs synchronously when pi-telephone is loaded, and `telephone` stays undefined otherwise.
+Calls made before the session starts wait for it.
+A name held by another live session on the machine rejects with `code: 'name_taken'`, and calls after the session closed reject with `code: 'not_active'`.
+The types are `TelephoneApiV1` in `pi/index.ts`.
 
 ## Upgrading
 

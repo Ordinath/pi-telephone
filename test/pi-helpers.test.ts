@@ -32,6 +32,9 @@ test('reply history expires after 24 hours, including the exact boundary', () =>
 test('names prefer explicit or previous names and suffix only auto-derived names', () => {
   assert.deepEqual(nameCandidates('chosen', 'previous', 'Project'), ['chosen']);
   assert.deepEqual(nameCandidates(undefined, 'previous', 'Project'), ['previous']);
+  assert.deepEqual(nameCandidates(undefined, 'previous', 'Project', 'a1b2c3'), ['previous', 'previous-a1b2c3']);
+  assert.deepEqual(nameCandidates('chosen', 'previous', 'Project', 'a1b2c3'), ['chosen']);
+  assert.ok(nameCandidates(undefined, 'p'.repeat(48), 'Project', 'a1b2c3').every(validName));
   assert.deepEqual(nameCandidates(undefined, undefined, 'My Project'), [
     'my-project', 'my-project-2', 'my-project-3', 'my-project-4', 'my-project-5', 'my-project-6', 'my-project-7', 'my-project-8', 'my-project-9',
   ]);

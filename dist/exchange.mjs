@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files"];
-var VERSION = false ? "0.2.5" : "0.2.5";
+var VERSION = false ? "0.2.6" : "0.2.6";
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);

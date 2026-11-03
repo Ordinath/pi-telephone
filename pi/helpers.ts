@@ -48,9 +48,10 @@ export function replyTarget(messages: readonly ReceivedMessage[], replyTo: strin
   return target.id;
 }
 
-export function nameCandidates(explicit: string | undefined, previous: string | undefined, derived: string): string[] {
+// `suffix` lets a restored session, such as a fork, answer under a variant while another live session holds its name.
+export function nameCandidates(explicit: string | undefined, previous: string | undefined, derived: string, suffix?: string): string[] {
   if (explicit !== undefined) return [explicit];
-  if (previous !== undefined) return [previous];
+  if (previous !== undefined) return suffix ? [previous, `${previous.slice(0, 47 - suffix.length)}-${suffix}`] : [previous];
   const base = slugify(derived);
   return [base, ...Array.from({ length: 8 }, (_, index) => `${base.slice(0, 46)}-${index + 2}`)];
 }
