@@ -47,7 +47,7 @@ async function session(t: TestContext, id: string, state?: { on: boolean; name?:
   t.after(stop);
   return {
     entries, notices, stop, events,
-    start() { handlers.get('session_start')!({ type: 'session_start', reason: 'startup' }, ctx); },
+    start(reason = 'startup') { return handlers.get('session_start')!({ type: 'session_start', reason }, ctx); },
     api(version = 1): TelephoneApiV1 | undefined {
       let api: TelephoneApiV1 | undefined;
       events.emit('pi-telephone:api', { version, provide: (value: TelephoneApiV1) => { api = value; } });
@@ -92,6 +92,22 @@ test('a restored session whose name is live elsewhere takes a suffixed name, and
   assert.deepEqual(await mainApi.on('pa'), { address: 'pa@alpha' });
   assert.deepEqual(main.saved(), { on: true, name: 'pa', allow: ['owner'] });
   assert.deepEqual(fork.saved(), { on: false, name: 'pa', allow: ['owner'] });
+});
+
+test('a second session_start for the same session keeps one line, and shutdown frees the name', async t => {
+  await exchange(t);
+  const state = { on: true, name: 'pa', allow: ['owner'] };
+  // Pi 1.4 RPC mode, which pi-web hosts, binds a switched, forked or new session twice.
+  const switched = await session(t, '019f0000-0000-7000-8000-0000000000e5', state);
+  await switched.start('resume');
+  await switched.start('resume');
+  const api = switched.api()!;
+  assert.equal(await on(api), 'pa@alpha');
+  assert.deepEqual(switched.notices, []);
+  await switched.stop();
+  const next = await session(t, '019f0000-0000-7000-8000-0000000000f6');
+  next.start();
+  assert.deepEqual(await next.api()!.on('pa'), { address: 'pa@alpha' });
 });
 
 test('an API call before session_start waits for it, other versions get nothing, and a closed session refuses', async t => {

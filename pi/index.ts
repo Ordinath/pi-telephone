@@ -219,6 +219,8 @@ export default async function telephone(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, ctx) => {
+    // Pi 1.4 RPC mode, which pi-web hosts, starts a switched, forked or new session twice; a second line would orphan the first.
+    if (current && !current.stopped && current.ctx.sessionManager.getSessionId() === ctx.sessionManager.getSessionId()) { current.ctx = ctx; return; }
     const branch = ctx.sessionManager.getBranch();
     const session: Line = {
       ctx, state: restoreState(branch), inbox: restoreInbox(branch, Date.now()), running: !ctx.isIdle(),
