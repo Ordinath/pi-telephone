@@ -593,6 +593,16 @@ test('host: messages carry a legacy harness to 0.2.x peers and their own once th
   assert.deepEqual(harnesses, ['cli', 'cli', 'pi-fleet']);
 });
 
+test('host: after a peer called first, a directory still fetches its hello, so later messages carry the host harness', async t => {
+  const f = await setup(t);
+  const { line } = await hostLine(t, f.homeA, 'fleet-line');
+  // An inbound call records beta as having an exchange, but not its hello.
+  await f.b.phone.send({ to: 'fleet-line@alpha', text: 'Hello first' });
+  await line.directory();
+  await line.send({ to: 'bob@beta', text: 'Back' });
+  assert.equal(f.b.messages.at(-1)?.from.harness, 'pi-fleet');
+});
+
 test('host: a line without files refuses them, and with deferReplies an ask returns only after resolveReply', async t => {
   const f = await setup(t);
   const messages: InboundMessage[] = [];

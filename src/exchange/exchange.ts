@@ -197,7 +197,9 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   }
   async function probe(peer: Peer): Promise<void> {
     const cached = discovery.get(peer.fqdn);
-    if (cached && cached.at > now() - (cached.hasExchange ? 60000 : 10000)) return;
+    // A peer's own call marks it as having an exchange without its hello; probe it anyway to learn its features.
+    const known = !!cached && (!!cached.hello || !!cached.reason || !cached.hasExchange);
+    if (known && cached!.at > now() - (cached!.hasExchange ? 60000 : 10000)) return;
     const endpoint = peerEndpoints.get(peer.fqdn);
     const ip = endpoint?.ip ?? ipv4(peer);
     if (!ip) { discovery.set(peer.fqdn, { at: now(), hasExchange: false, reason: 'No Tailscale IPv4' }); return; }

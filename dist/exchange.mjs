@@ -756,7 +756,8 @@ function createExchange(options) {
   }
   async function probe(peer) {
     const cached = discovery.get(peer.fqdn);
-    if (cached && cached.at > now() - (cached.hasExchange ? 6e4 : 1e4)) return;
+    const known = !!cached && (!!cached.hello || !!cached.reason || !cached.hasExchange);
+    if (known && cached.at > now() - (cached.hasExchange ? 6e4 : 1e4)) return;
     const endpoint = peerEndpoints.get(peer.fqdn);
     const ip = endpoint?.ip ?? ipv4(peer);
     if (!ip) {
