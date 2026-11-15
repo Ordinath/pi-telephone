@@ -1,7 +1,8 @@
-import { isAbsolute } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -25,6 +26,22 @@ export interface ClientOptions {
 }
 // When the clients of one process start together, one spawns the exchange and the rest wait for its socket.
 const recentSpawns = new Map<string, number>();
+function findExecutable(name: string, path = ''): string | undefined {
+  for (const directory of path.split(delimiter).filter(Boolean)) {
+    try { accessSync(join(directory, name), constants.X_OK); return join(directory, name); } catch { /* Not in this directory. */ }
+  }
+  return undefined;
+}
+// systemd stops every process of a unit with it, even a detached one, so a host that runs as a unit starts the exchange in its own
+// transient user unit. False when that is not possible; the caller then starts it detached, and a duplicate exits on the exchange lock.
+function startInSystemdUnit(runtime: string, entry: string, env: Record<string, string | undefined>, home: string): Promise<boolean> {
+  const executable = isAbsolute(runtime) ? runtime : findExecutable(runtime, env.PATH);
+  if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
+  const unit = `pi-telephone-exchange-${createHash('sha256').update(home).digest('hex').slice(0, 8)}`;
+  const settings = Object.entries(env).flatMap(([key, value]) => value === undefined ? [] : [`--setenv=${key}=${value}`]);
+  return new Promise(resolve => execFile('systemd-run', ['--user', '--quiet', '--collect', `--unit=${unit}`, ...settings, executable, entry],
+    { timeout: 3000 }, error => resolve(!error)));
+}
 interface PendingRequest { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }
 interface ReplyWait { resolve: (message: InboundMessage) => void; reject: (error: Error) => void }
 export class TelephoneClient extends EventEmitter {
@@ -63,15 +80,17 @@ export class TelephoneClient extends EventEmitter {
         if (!isFsError(error, 'ENOENT') && !isFsError(error, 'ECONNREFUSED')) throw error;
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2000) {
           recentSpawns.set(this.home, Date.now());
+          spawned = true;
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
-          const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
-            ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'].includes(key) || key.startsWith('PI_TELEPHONE_')));
+          const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+            ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'].includes(key) || key.startsWith('PI_TELEPHONE_'))), PI_TELEPHONE_HOME: this.home };
           // A standalone Pi build (Bun or a Node single executable) is its own binary and cannot run a script, so use node from PATH.
           const runtime = process.versions.bun || process.getBuiltinModule?.('node:sea')?.isSea() ? 'node' : process.execPath;
-          const child = spawn(runtime, [entry], { detached: true, stdio: 'ignore', env: { ...env, PI_TELEPHONE_HOME: this.home } });
-          child.on('error', error => { failed = error; });
-          child.unref();
-          spawned = true;
+          if (!await startInSystemdUnit(runtime, entry, env, this.home)) {
+            const child = spawn(runtime, [entry], { detached: true, stdio: 'ignore', env });
+            child.on('error', error => { failed = error; });
+            child.unref();
+          }
         }
         if (failed) throw new TelephoneError('unreachable', failed.code === 'ENOENT' ? 'Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH' : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError('unreachable', 'Exchange did not start within 5 seconds');

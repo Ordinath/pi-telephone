@@ -405,11 +405,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants);
+          this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -426,10 +426,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants);
+        this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -490,8 +490,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants) {
-        this.code = optimizeExpr(this.code, names, constants);
+      optimizeNames(names, constants2) {
+        this.code = optimizeExpr(this.code, names, constants2);
         return this;
       }
       get names() {
@@ -520,12 +520,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants))
+          if (n.optimizeNames(names, constants2))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -578,12 +578,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3;
-        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        if (!(super.optimizeNames(names, constants) || this.else))
+        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        if (!(super.optimizeNames(names, constants2) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants);
+        this.condition = optimizeExpr(this.condition, names, constants2);
         return this;
       }
       get names() {
@@ -606,10 +606,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants);
+        this.iteration = optimizeExpr(this.iteration, names, constants2);
         return this;
       }
       get names() {
@@ -645,10 +645,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants);
+        this.iterable = optimizeExpr(this.iterable, names, constants2);
         return this;
       }
       get names() {
@@ -690,11 +690,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3, _b;
-        super.optimizeNames(names, constants);
-        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants);
+        super.optimizeNames(names, constants2);
+        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
         return this;
       }
       get names() {
@@ -995,7 +995,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants) {
+    function optimizeExpr(expr, names, constants2) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -1010,14 +1010,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants[n.str];
+        const c = constants2[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -12829,8 +12829,8 @@ function emoji() {
 }
 var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
-var mac = (delimiter) => {
-  const escapedDelim = escapeRegex(delimiter ?? ":");
+var mac = (delimiter2) => {
+  const escapedDelim = escapeRegex(delimiter2 ?? ":");
   return new RegExp(`^(?:[0-9A-F]{2}${escapedDelim}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapedDelim}){5}[0-9a-f]{2}$`);
 };
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
@@ -36481,7 +36481,7 @@ var StdioServerTransport = class {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var CLIENT_FEATURES = ["files"];
-var VERSION = false ? "0.3.0" : "0.3.0";
+var VERSION = false ? "0.3.1" : "0.3.1";
 var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
 function wireHarness(harness, features) {
   return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
@@ -36509,10 +36509,11 @@ function normalizeMachine(value) {
 }
 
 // src/client.ts
-import { isAbsolute } from "node:path";
+import { delimiter, isAbsolute, join as join2 } from "node:path";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -36579,6 +36580,28 @@ function readFrames(socket, receive) {
 
 // src/client.ts
 var recentSpawns = /* @__PURE__ */ new Map();
+function findExecutable(name2, path = "") {
+  for (const directory of path.split(delimiter).filter(Boolean)) {
+    try {
+      accessSync(join2(directory, name2), constants.X_OK);
+      return join2(directory, name2);
+    } catch {
+    }
+  }
+  return void 0;
+}
+function startInSystemdUnit(runtime, entry, env, home) {
+  const executable = isAbsolute(runtime) ? runtime : findExecutable(runtime, env.PATH);
+  if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
+  const unit = `pi-telephone-exchange-${createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
+  const settings = Object.entries(env).flatMap(([key2, value]) => value === void 0 ? [] : [`--setenv=${key2}=${value}`]);
+  return new Promise((resolve3) => execFile(
+    "systemd-run",
+    ["--user", "--quiet", "--collect", `--unit=${unit}`, ...settings, executable, entry],
+    { timeout: 3e3 },
+    (error62) => resolve3(!error62)
+  ));
+}
 var TelephoneClient = class extends EventEmitter {
   constructor(opts) {
     super();
@@ -36624,15 +36647,17 @@ var TelephoneClient = class extends EventEmitter {
         if (!isFsError(error62, "ENOENT") && !isFsError(error62, "ECONNREFUSED")) throw error62;
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2e3) {
           recentSpawns.set(this.home, Date.now());
-          const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
-          const env = Object.fromEntries(Object.entries(process.env).filter(([key2]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key2) || key2.startsWith("PI_TELEPHONE_")));
-          const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
-          const child = spawn(runtime, [entry], { detached: true, stdio: "ignore", env: { ...env, PI_TELEPHONE_HOME: this.home } });
-          child.on("error", (error63) => {
-            failed = error63;
-          });
-          child.unref();
           spawned = true;
+          const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
+          const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key2]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key2) || key2.startsWith("PI_TELEPHONE_"))), PI_TELEPHONE_HOME: this.home };
+          const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
+          if (!await startInSystemdUnit(runtime, entry, env, this.home)) {
+            const child = spawn(runtime, [entry], { detached: true, stdio: "ignore", env });
+            child.on("error", (error63) => {
+              failed = error63;
+            });
+            child.unref();
+          }
         }
         if (failed) throw new TelephoneError("unreachable", failed.code === "ENOENT" ? "Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH" : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError("unreachable", "Exchange did not start within 5 seconds");

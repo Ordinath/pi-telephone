@@ -123,6 +123,7 @@ await line.close(); // unregisters the line
 
 - Use one `TelephoneClient` for each line (session name); one process can hold many.
 - The first client that finds no exchange starts `dist/exchange.mjs` from its package with Node.js 20 or later, detached, under `~/.pi-telephone` (`PI_TELEPHONE_HOME` overrides it).
+- When the client runs inside a systemd unit (`INVOCATION_ID` is set), it starts the exchange with `systemd-run --user` as its own transient unit, `pi-telephone-exchange-<first 8 hex digits of the SHA-256 of the home path>`, because systemd stops even detached processes with their unit. If `systemd-run` fails, it starts the exchange detached as above.
 - `onMessage` is the acknowledgement: return `{ accepted: true }` or `{ accepted: false, reason }`. The exchange has already checked trust and the line's allowlist. `from` carries `address`, `session`, `machine`, `fqdn`, `login`, `displayName`, `harness` and `local`.
 - `connect()` returns the exchange: `version`, `features` and `machine`, whose `login` is the machine's owner.
 - A client reconnects and registers again by itself after the exchange restarts. It emits `connected`, `reconnected`, `disconnected` and `retrying` (with the error).

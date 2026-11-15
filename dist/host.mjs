@@ -1,8 +1,9 @@
 // src/client.ts
-import { isAbsolute } from "node:path";
+import { delimiter, isAbsolute, join as join2 } from "node:path";
 import { EventEmitter } from "node:events";
-import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile, spawn } from "node:child_process";
+import { accessSync, constants } from "node:fs";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -67,7 +68,7 @@ function readFrames(socket, receive) {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var CLIENT_FEATURES = ["files"];
-var VERSION = false ? "0.3.0" : "0.3.0";
+var VERSION = false ? "0.3.1" : "0.3.1";
 var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
 function wireHarness(harness, features) {
   return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
@@ -85,6 +86,28 @@ function isUuid(id) {
 
 // src/client.ts
 var recentSpawns = /* @__PURE__ */ new Map();
+function findExecutable(name, path = "") {
+  for (const directory of path.split(delimiter).filter(Boolean)) {
+    try {
+      accessSync(join2(directory, name), constants.X_OK);
+      return join2(directory, name);
+    } catch {
+    }
+  }
+  return void 0;
+}
+function startInSystemdUnit(runtime, entry, env, home) {
+  const executable = isAbsolute(runtime) ? runtime : findExecutable(runtime, env.PATH);
+  if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
+  const unit = `pi-telephone-exchange-${createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
+  const settings = Object.entries(env).flatMap(([key, value]) => value === void 0 ? [] : [`--setenv=${key}=${value}`]);
+  return new Promise((resolve2) => execFile(
+    "systemd-run",
+    ["--user", "--quiet", "--collect", `--unit=${unit}`, ...settings, executable, entry],
+    { timeout: 3e3 },
+    (error) => resolve2(!error)
+  ));
+}
 var TelephoneClient = class extends EventEmitter {
   constructor(opts) {
     super();
@@ -130,15 +153,17 @@ var TelephoneClient = class extends EventEmitter {
         if (!isFsError(error, "ENOENT") && !isFsError(error, "ECONNREFUSED")) throw error;
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2e3) {
           recentSpawns.set(this.home, Date.now());
-          const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
-          const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key) || key.startsWith("PI_TELEPHONE_")));
-          const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
-          const child = spawn(runtime, [entry], { detached: true, stdio: "ignore", env: { ...env, PI_TELEPHONE_HOME: this.home } });
-          child.on("error", (error2) => {
-            failed = error2;
-          });
-          child.unref();
           spawned = true;
+          const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
+          const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key) || key.startsWith("PI_TELEPHONE_"))), PI_TELEPHONE_HOME: this.home };
+          const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
+          if (!await startInSystemdUnit(runtime, entry, env, this.home)) {
+            const child = spawn(runtime, [entry], { detached: true, stdio: "ignore", env });
+            child.on("error", (error2) => {
+              failed = error2;
+            });
+            child.unref();
+          }
         }
         if (failed) throw new TelephoneError("unreachable", failed.code === "ENOENT" ? "Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH" : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError("unreachable", "Exchange did not start within 5 seconds");
