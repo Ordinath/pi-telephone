@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+// src/cli.ts
+import { readFile as readFile2 } from "node:fs/promises";
+import { setTimeout as sleep2 } from "node:timers/promises";
+
 // src/config.ts
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -75,7 +79,7 @@ function readFrames(socket, receive) {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var CLIENT_FEATURES = ["files"];
-var VERSION = false ? "0.3.1" : "0.3.1";
+var VERSION = false ? "0.3.2" : "0.3.2";
 var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
 function wireHarness(harness, features) {
   return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
@@ -158,6 +162,7 @@ var TelephoneClient = class extends EventEmitter {
         });
       } catch (error) {
         if (!isFsError(error, "ENOENT") && !isFsError(error, "ECONNREFUSED")) throw error;
+        if (this.opts.start === false) throw new TelephoneError("not_running", "No exchange is running");
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2e3) {
           recentSpawns.set(this.home, Date.now());
           spawned = true;
@@ -391,6 +396,14 @@ var TelephoneClient = class extends EventEmitter {
 };
 
 // src/cli.ts
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "EPERM";
+  }
+}
 var [command = "help", login] = process.argv.slice(2);
 var help = "Usage: pi-telephone status | list | trust <login> | untrust <login> | stop | help";
 if (command === "help") console.log(help);
@@ -398,7 +411,7 @@ else if (!["status", "list", "trust", "untrust", "stop"].includes(command) || ["
   console.error(help);
   process.exitCode = 1;
 } else {
-  const client = new TelephoneClient({ harness: "cli", version: VERSION, onMessage: async () => ({ accepted: false }) });
+  const client = new TelephoneClient({ harness: "cli", version: VERSION, start: command !== "stop", onMessage: async () => ({ accepted: false }) });
   try {
     const info = await client.connect();
     switch (command) {
@@ -429,14 +442,22 @@ else if (!["status", "list", "trust", "untrust", "stop"].includes(command) || ["
       case "untrust":
         console.log((await client.setTrustedUsers({ remove: [login] })).trustedUsers.join("\n"));
         break;
-      case "stop":
+      case "stop": {
+        const pid = Number(await readFile2(paths().lock, "utf8").catch(() => ""));
         await client.shutdownExchange();
+        for (const deadline = Date.now() + 5e3; pid > 0 && alive(pid); await sleep2(25)) {
+          if (Date.now() > deadline) throw new TelephoneError("unreachable", `Exchange ${pid} did not stop within 5 seconds`);
+        }
         console.log("Exchange stopped");
         break;
+      }
     }
   } catch (error) {
-    console.error(error instanceof Error ? error.message : "Telephone command failed");
-    process.exitCode = 1;
+    if (command === "stop" && error instanceof TelephoneError && error.code === "not_running") console.log("No exchange is running");
+    else {
+      console.error(error instanceof Error ? error.message : "Telephone command failed");
+      process.exitCode = 1;
+    }
   } finally {
     await client.close();
   }

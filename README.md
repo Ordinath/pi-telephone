@@ -144,6 +144,7 @@ Version skew:
 After updating the package, run `npx pi-telephone stop` once so the exchange
 restarts on the new version (or `/telephone restart` in Pi). Restart sessions
 that should send or receive files.
+`stop` returns after the exchange process has exited, and it never starts one: with none running, it prints "No exchange is running".
 
 ## Connecting two people
 

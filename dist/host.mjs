@@ -68,7 +68,7 @@ function readFrames(socket, receive) {
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var CLIENT_FEATURES = ["files"];
-var VERSION = false ? "0.3.1" : "0.3.1";
+var VERSION = false ? "0.3.2" : "0.3.2";
 var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
 function wireHarness(harness, features) {
   return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
@@ -154,6 +154,7 @@ var TelephoneClient = class extends EventEmitter {
         });
       } catch (error) {
         if (!isFsError(error, "ENOENT") && !isFsError(error, "ECONNREFUSED")) throw error;
+        if (this.opts.start === false) throw new TelephoneError("not_running", "No exchange is running");
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2e3) {
           recentSpawns.set(this.home, Date.now());
           spawned = true;

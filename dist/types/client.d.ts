@@ -14,6 +14,8 @@ export interface ClientOptions {
     features?: string[];
     /** Pass replies to this client's own asks to onMessage too; the ask returns only after resolveReply(message). */
     deferReplies?: boolean;
+    /** False: only connect to a running exchange, and fail with not_running instead of starting one. Default true. */
+    start?: boolean;
 }
 export declare class TelephoneClient extends EventEmitter {
     private readonly opts;

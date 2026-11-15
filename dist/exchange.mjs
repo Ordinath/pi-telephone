@@ -77,7 +77,7 @@ import { isIP } from "node:net";
 // src/protocol.ts
 var PROTO_VERSION = 1;
 var FEATURES = ["files", "any-harness"];
-var VERSION = false ? "0.3.1" : "0.3.1";
+var VERSION = false ? "0.3.2" : "0.3.2";
 var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
 function wireHarness(harness, features) {
   return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";

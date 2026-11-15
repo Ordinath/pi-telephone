@@ -4,7 +4,7 @@ export const FEATURES = ['files', 'any-harness'];
 // What a session client can receive, unless its host says otherwise.
 export const CLIENT_FEATURES = ['files'];
 declare const __PACKAGE_VERSION__: string;
-export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.3.1' : __PACKAGE_VERSION__;
+export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.3.2' : __PACKAGE_VERSION__;
 export type Harness = 'pi' | 'claude-code' | 'cli' | 'pi-fleet';
 const LEGACY_HARNESSES = ['pi', 'claude-code', 'cli'];
 // The harness name an exchange with these features accepts; 0.2.x exchanges refuse any but the legacy three.

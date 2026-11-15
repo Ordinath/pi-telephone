@@ -23,6 +23,8 @@ export interface ClientOptions {
   features?: string[];
   /** Pass replies to this client's own asks to onMessage too; the ask returns only after resolveReply(message). */
   deferReplies?: boolean;
+  /** False: only connect to a running exchange, and fail with not_running instead of starting one. Default true. */
+  start?: boolean;
 }
 // When the clients of one process start together, one spawns the exchange and the rest wait for its socket.
 const recentSpawns = new Map<string, number>();
@@ -80,6 +82,7 @@ export class TelephoneClient extends EventEmitter {
         });
       } catch (error) {
         if (!isFsError(error, 'ENOENT') && !isFsError(error, 'ECONNREFUSED')) throw error;
+        if (this.opts.start === false) throw new TelephoneError('not_running', 'No exchange is running');
         if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2000) {
           recentSpawns.set(this.home, Date.now());
           spawned = true;

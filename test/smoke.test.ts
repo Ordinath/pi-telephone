@@ -213,3 +213,42 @@ test('bundled daemon starts on demand, locks exclusively and removes private sta
     await sleep(25);
   }
 });
+
+test('cli stop returns after the exchange has exited, and never starts one', { timeout: 20000 }, async t => {
+  const root = await mkdtemp('/tmp/pi-tel-stop-');
+  const pids: number[] = [];
+  t.after(async () => {
+    for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; } }
+    await rm(root, { recursive: true, force: true });
+  });
+  const cli = fileURLToPath(new URL('../dist/cli.mjs', import.meta.url));
+  const env = (home: string) => ({ PATH: process.env.PATH, HOME: process.env.HOME, PI_TELEPHONE_HOME: home, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: '60000' });
+  async function run(home: string, command: string): Promise<{ code: number | null; output: string }> {
+    const child = spawn(process.execPath, [cli, command], { env: env(home), stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    const [code] = await once(child, 'exit');
+    return { code, output: output.trim() };
+  }
+  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; return false; } };
+  // No exchange: stop says so and starts none.
+  const empty = `${root}/empty`;
+  assert.deepEqual(await run(empty, 'stop'), { code: 0, output: 'No exchange is running' });
+  await assert.rejects(stat(paths(empty).log), { code: 'ENOENT' });
+  // A running exchange: stop returns only after its process has exited.
+  const home = `${root}/running`;
+  assert.equal((await run(home, 'status')).code, 0);
+  const pid = Number(await readFile(paths(home).lock, 'utf8'));
+  pids.push(pid);
+  assert.ok(alive(pid));
+  assert.deepEqual(await run(home, 'stop'), { code: 0, output: 'Exchange stopped' });
+  assert.equal(alive(pid), false);
+  // An exchange whose home was deleted under it cannot be reached; stop must not start and stop a new one in its place.
+  const deleted = `${root}/deleted`;
+  assert.equal((await run(deleted, 'status')).code, 0);
+  pids.push(Number(await readFile(paths(deleted).lock, 'utf8')));
+  await rm(deleted, { recursive: true, force: true });
+  assert.deepEqual(await run(deleted, 'stop'), { code: 0, output: 'No exchange is running' });
+  await assert.rejects(stat(deleted), { code: 'ENOENT' });
+});
