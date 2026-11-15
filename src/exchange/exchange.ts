@@ -328,6 +328,16 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       fromPort: options.port, to: { session: route.session }, text: request.text, expectReply: request.expectReply === true, replyTo, sentAt: new Date(now()).toISOString(),
       ...(files ? { files } : {}),
     };
+    // A peer that went back to 0.2.x refuses a new harness name before acting on the message, so resend it once as 'cli'.
+    const post = async <T>(path: string, timeout: number): Promise<T> => {
+      try { return await remote<T>(route.ip!, route.port, path, timeout, message); }
+      catch (error) {
+        if (!(error instanceof TelephoneError) || error.code !== 'invalid_request' || wireHarness(message.from.harness, undefined) === message.from.harness) throw error;
+        discovery.delete(route.machine.fqdn);
+        message.from.harness = 'cli';
+        return await remote<T>(route.ip!, route.port, path, timeout, message);
+      }
+    };
     try {
       if (files) {
         if (route.local) {
@@ -351,7 +361,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every(value => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError('peer_unsupported', 'Peer does not advertise valid file limits.');
           const total = files.reduce((sum, file) => sum + file.size, 0);
           if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError('too_large', `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
-          const offered = await remote<{ upload: string }>(route.ip!, route.port, '/v1/offer', 15000, message);
+          const offered = await post<{ upload: string }>('/v1/offer', 15000);
           if (!isUuid(offered.upload)) throw new TelephoneError('unreachable', 'Invalid upload id');
           async function* bytes() {
             for (const file of request.files!) yield* createReadStream(file.path);
@@ -360,7 +370,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
             fromPort: options.port, localAddress: listening?.address, upload: bytes(), size: total });
         }
       } else if (route.local) await deliver(message, self, true);
-      else await remote(route.ip!, route.port, '/v1/deliver', 8000, message);
+      else await post('/v1/deliver', 8000);
       if (replyTo) { const entry = inbound.get(replyTo); if (entry?.targetKey === sender.session.key) entry.answered = true; }
       void log(options.home, 'info', `Sent ${request.id} bytes=${Buffer.byteLength(request.text)} files=${files?.length ?? 0} fileBytes=${files?.reduce((sum, file) => sum + file.size, 0) ?? 0} to=${address(route)}`);
       return { id: request.id, status: 'delivered', to: address(route), ...(inferredReplyTo ? { inferredReplyTo } : {}), ...(files ? { files } : {}) };
@@ -511,7 +521,9 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     const machine = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine) throw new TelephoneError('forbidden');
     const cached = discovery.get(machine.fqdn);
-    discovery.set(machine.fqdn, { at: cached?.hello ? cached.at : now(), hasExchange: true, hello: cached?.hello });
+    // The call shows the peer has an exchange; a known hello and a peer's refusal to trust us keep their own expiry.
+    const notTrusted = cached?.reason === 'not_trusted';
+    discovery.set(machine.fqdn, { at: cached?.hello || notTrusted ? cached!.at : now(), hasExchange: true, hello: cached?.hello, ...(notTrusted ? { reason: cached!.reason } : {}) });
     return machine;
   }
   async function handleNetwork(input: HttpInput, machine: MachineIdentity): Promise<HttpOutput> {

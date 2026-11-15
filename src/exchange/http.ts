@@ -10,7 +10,7 @@ const peerErrors: Record<string, string> = {
   too_large: 'Message is too large', rate_limited: 'Peer rate limit exceeded', delivery_failed: 'Recipient did not accept the message',
   invalid_id: 'Invalid message id', invalid_request: 'Invalid request', proto_mismatch: 'Incompatible telephone protocol',
   forbidden: 'Peer refused the request',
-  recipient_unsupported: 'The recipient session runs an older pi-telephone and cannot receive files until it restarts.',
+  recipient_unsupported: 'The recipient session does not accept files; a session on an older pi-telephone does after a restart.',
   inbox_full: 'The recipient inbox is full', checksum_mismatch: 'File checksum did not match', upload_expired: 'File upload expired',
 };
 const errorStatus: Record<string, number> = {

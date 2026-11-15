@@ -415,7 +415,7 @@ var peerErrors = {
   invalid_request: "Invalid request",
   proto_mismatch: "Incompatible telephone protocol",
   forbidden: "Peer refused the request",
-  recipient_unsupported: "The recipient session runs an older pi-telephone and cannot receive files until it restarts.",
+  recipient_unsupported: "The recipient session does not accept files; a session on an older pi-telephone does after a restart.",
   inbox_full: "The recipient inbox is full",
   checksum_mismatch: "File checksum did not match",
   upload_expired: "File upload expired"
@@ -918,6 +918,16 @@ function createExchange(options) {
       sentAt: new Date(now()).toISOString(),
       ...files ? { files } : {}
     };
+    const post = async (path, timeout) => {
+      try {
+        return await remote(route.ip, route.port, path, timeout, message);
+      } catch (error) {
+        if (!(error instanceof TelephoneError) || error.code !== "invalid_request" || wireHarness(message.from.harness, void 0) === message.from.harness) throw error;
+        discovery.delete(route.machine.fqdn);
+        message.from.harness = "cli";
+        return await remote(route.ip, route.port, path, timeout, message);
+      }
+    };
     try {
       if (files) {
         if (route.local) {
@@ -939,7 +949,7 @@ function createExchange(options) {
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every((value) => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError("peer_unsupported", "Peer does not advertise valid file limits.");
           const total = files.reduce((sum, file) => sum + file.size, 0);
           if (total > peerLimits.maxFileBytes || files.length > peerLimits.maxFiles) throw new TelephoneError("too_large", `Files exceed ${route.machine.short}'s limit of ${formatBytes(peerLimits.maxFileBytes)} or ${peerLimits.maxFiles} files per message.`);
-          const offered = await remote(route.ip, route.port, "/v1/offer", 15e3, message);
+          const offered = await post("/v1/offer", 15e3);
           if (!isUuid(offered.upload)) throw new TelephoneError("unreachable", "Invalid upload id");
           async function* bytes() {
             for (const file of request2.files) yield* createReadStream2(file.path);
@@ -956,7 +966,7 @@ function createExchange(options) {
           });
         }
       } else if (route.local) await deliver(message, self, true);
-      else await remote(route.ip, route.port, "/v1/deliver", 8e3, message);
+      else await post("/v1/deliver", 8e3);
       if (replyTo) {
         const entry = inbound.get(replyTo);
         if (entry?.targetKey === sender.session.key) entry.answered = true;
@@ -1147,7 +1157,8 @@ function createExchange(options) {
     const machine2 = await options.identity.whois(input.sourceIP, { fromPort: input.fromPort });
     if (!machine2) throw new TelephoneError("forbidden");
     const cached = discovery.get(machine2.fqdn);
-    discovery.set(machine2.fqdn, { at: cached?.hello ? cached.at : now(), hasExchange: true, hello: cached?.hello });
+    const notTrusted = cached?.reason === "not_trusted";
+    discovery.set(machine2.fqdn, { at: cached?.hello || notTrusted ? cached.at : now(), hasExchange: true, hello: cached?.hello, ...notTrusted ? { reason: cached.reason } : {} });
     return machine2;
   }
   async function handleNetwork(input, machine2) {

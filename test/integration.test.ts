@@ -562,22 +562,26 @@ test('host: a pi-fleet line lists under its own harness, and a 0.2.x requester g
   assert.equal(old.sessions.find(entry => entry.session === 'fleet-line')?.harness, 'cli');
 });
 
-test('host: messages carry a legacy harness to 0.2.x peers and their own once the peer accepts any harness', async t => {
+test('host: messages carry a legacy harness to 0.2.x peers, their own to 0.3 peers, and recover when a peer goes back to 0.2.x', async t => {
   const f = await setup(t);
   await f.b.phone.close();
   await f.stopB();
-  let features = ['files'], directoryPath = '';
+  // The fake peer behaves like 0.2.7 while `old` is set: no any-harness feature, and it refuses harness names it does not know.
+  let old = true, directoryPath = '';
   const harnesses: string[] = [];
   const server = createHttpServer(async (req, res) => {
     res.setHeader('content-type', 'application/json');
-    if (req.url === '/v1/hello') res.end(JSON.stringify({ proto: 1, version: '0.2.7', features, limits: { maxFileBytes: 1000, maxFiles: 1 }, machine: { fqdn: f.bob.fqdn, short: 'beta', login: f.bob.login } }));
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    if (req.url === '/v1/hello') res.end(JSON.stringify({ proto: 1, version: old ? '0.2.7' : '0.3.0', features: old ? ['files'] : ['files', 'any-harness'], limits: { maxFileBytes: 1000, maxFiles: 1 }, machine: { fqdn: f.bob.fqdn, short: 'beta', login: f.bob.login } }));
     else if (req.url?.startsWith('/v1/directory')) { directoryPath = req.url; res.end(JSON.stringify({ sessions: [{ session: 'old', harness: 'pi', status: 'idle' }] })); }
-    else if (req.url === '/v1/deliver') {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      harnesses.push(JSON.parse(body).from.harness);
-      res.end('{}');
-    } else { res.statusCode = 404; res.end('{}'); }
+    else if (req.url === '/v1/deliver' || req.url === '/v1/offer') {
+      const harness = JSON.parse(body).from.harness;
+      harnesses.push(`${req.url.slice(4)} ${harness}`);
+      if (old && !['pi', 'claude-code', 'cli'].includes(harness)) { res.statusCode = 400; res.end(JSON.stringify({ error: 'invalid_request' })); }
+      else res.end(JSON.stringify(req.url === '/v1/offer' ? { upload: randomUUID() } : {}));
+    } else if (req.url?.startsWith('/v1/upload/')) res.end('{}');
+    else { res.statusCode = 404; res.end('{}'); }
   });
   await new Promise<void>(resolve => server.listen(f.portB, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
@@ -586,11 +590,40 @@ test('host: messages carry a legacy harness to 0.2.x peers and their own once th
   await line.directory();
   assert.match(directoryPath, /[?&]features=any-harness/);
   await line.send({ to: 'old@beta', text: 'After a 0.2.x hello' });
-  features = ['files', 'any-harness'];
+  old = false;
   f.advance(60001);
   await line.directory();
   await line.send({ to: 'old@beta', text: 'After a 0.3 hello' });
-  assert.deepEqual(harnesses, ['cli', 'cli', 'pi-fleet']);
+  // The peer goes back to 0.2.x while this exchange still holds its 0.3 hello.
+  old = true;
+  await line.send({ to: 'old@beta', text: 'Refused once, then resent as cli' });
+  await line.send({ to: 'old@beta', text: 'The stale hello is gone' });
+  old = false;
+  f.advance(60001);
+  await line.directory();
+  old = true;
+  const file = await sourceFile(f.homeA);
+  await line.send({ to: 'old@beta', text: '', files: [file] });
+  assert.deepEqual(harnesses, ['deliver cli', 'deliver cli', 'deliver pi-fleet', 'deliver pi-fleet', 'deliver cli', 'deliver cli', 'offer pi-fleet', 'offer cli']);
+});
+
+test('host: a peer that refused us as untrusted and then called us is not probed again within a minute', async t => {
+  const f = await setup(t);
+  await f.b.phone.close();
+  await f.stopB();
+  let hellos = 0;
+  const server = createHttpServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/v1/hello') { hellos++; res.end(JSON.stringify({ proto: 1, version: '0.3.0', features: ['files', 'any-harness'], machine: { fqdn: f.bob.fqdn, short: 'beta', login: f.bob.login } })); }
+    else { res.statusCode = 403; res.end(JSON.stringify({ error: 'not_trusted' })); }
+  });
+  await new Promise<void>(resolve => server.listen(f.portB, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  assert.deepEqual((await f.a.phone.directory()).warnings, ['beta: not_trusted']);
+  // beta calls alpha, which records that beta has an exchange.
+  await peerRequest({ host: '127.0.0.1', port: f.portA, path: '/v1/hello', timeout: 2000, fromPort: f.portB });
+  assert.deepEqual((await f.a.phone.directory()).warnings, ['beta: not_trusted']);
+  assert.equal(hellos, 1);
 });
 
 test('host: after a peer called first, a directory still fetches its hello, so later messages carry the host harness', async t => {
