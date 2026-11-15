@@ -66,10 +66,10 @@ test('under systemd the exchange starts in its own transient user unit, and with
     for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
     delete (process.versions as Record<string, string>).bun;
     await Promise.all(clients.map(client => client.close()));
-    // Stop every exchange a case may have started, also one whose client failed, and wait until it has exited.
-    for (const home of homes) {
-      const pid = Number(await readFile(paths(home).lock, 'utf8').catch(() => '0'));
-      if (!pid) continue;
+    // Stop every exchange a case may have started, also one whose client failed or that is still in its slow start, and wait until it has exited.
+    const slowPids = (await readFile(`${root}/slow.pids`, 'utf8').catch(() => '')).split('\n');
+    const lockPids = await Promise.all(homes.map(home => readFile(paths(home).lock, 'utf8').catch(() => '')));
+    for (const pid of new Set([...slowPids, ...lockPids].map(Number).filter(Boolean))) {
       try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; continue; }
       for (const deadline = Date.now() + 3000; Date.now() < deadline; await sleep(25)) {
         try { process.kill(pid, 0); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; break; }
@@ -91,7 +91,8 @@ nohup "$@" >/dev/null 2>&1 &
   const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
   // An exchange that needs 2.5 s to come up, for example with a large inbox to scan.
   const slowEntry = `${root}/slow-exchange.mjs`;
-  await writeFile(slowEntry, `await new Promise(resolve => setTimeout(resolve, 2500));\nawait import(${JSON.stringify(pathToFileURL(entry).href)});\n`);
+  await writeFile(slowEntry, `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(`${root}/slow.pids`)}, process.pid + '\\n');\n`
+    + `await new Promise(resolve => setTimeout(resolve, 2500));\nawait import(${JSON.stringify(pathToFileURL(entry).href)});\n`);
   Object.assign(process.env, { PATH: `${bin}:${previous.PATH}`, FAKE_SYSTEMD_LOG: log, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: idleExitMs });
   async function start(name: string, env: Record<string, string | undefined>, exchangeEntry = entry): Promise<string> {
     for (const [key, value] of Object.entries(env)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
