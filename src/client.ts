@@ -1,8 +1,8 @@
-import { delimiter, isAbsolute, join } from 'node:path';
+import { delimiter, isAbsolute, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -26,9 +26,11 @@ export interface ClientOptions {
 }
 // When the clients of one process start together, one spawns the exchange and the rest wait for its socket.
 const recentSpawns = new Map<string, number>();
+// As a shell finds a command: an empty PATH entry means the current directory, and only an executable regular file counts.
 function findExecutable(name: string, path = ''): string | undefined {
-  for (const directory of path.split(delimiter).filter(Boolean)) {
-    try { accessSync(join(directory, name), constants.X_OK); return join(directory, name); } catch { /* Not in this directory. */ }
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve(directory || '.', name);
+    try { if (statSync(candidate).isFile()) { accessSync(candidate, constants.X_OK); return candidate; } } catch { /* Not in this directory. */ }
   }
   return undefined;
 }
@@ -64,7 +66,7 @@ export class TelephoneClient extends EventEmitter {
     return this.connecting;
   }
   private async ensureExchange(): Promise<Socket> {
-    const deadline = Date.now() + 5000;
+    let deadline = Date.now() + 5000;
     let spawned = false;
     let failed: NodeJS.ErrnoException | undefined;
     let backoff = 25;
@@ -91,6 +93,8 @@ export class TelephoneClient extends EventEmitter {
             child.on('error', error => { failed = error; });
             child.unref();
           }
+          // A slow or failed systemd-run must not shorten the time the exchange itself has to start.
+          deadline = Date.now() + 5000;
         }
         if (failed) throw new TelephoneError('unreachable', failed.code === 'ENOENT' ? 'Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH' : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError('unreachable', 'Exchange did not start within 5 seconds');

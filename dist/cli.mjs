@@ -32,11 +32,11 @@ function formatBytes(n) {
 }
 
 // src/client.ts
-import { delimiter, isAbsolute, join as join2 } from "node:path";
+import { delimiter, isAbsolute, resolve as resolve2 } from "node:path";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -91,10 +91,13 @@ var TelephoneError = class extends Error {
 // src/client.ts
 var recentSpawns = /* @__PURE__ */ new Map();
 function findExecutable(name, path = "") {
-  for (const directory of path.split(delimiter).filter(Boolean)) {
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve2(directory || ".", name);
     try {
-      accessSync(join2(directory, name), constants.X_OK);
-      return join2(directory, name);
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      }
     } catch {
     }
   }
@@ -105,11 +108,11 @@ function startInSystemdUnit(runtime, entry, env, home) {
   if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
   const unit = `pi-telephone-exchange-${createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
   const settings = Object.entries(env).flatMap(([key, value]) => value === void 0 ? [] : [`--setenv=${key}=${value}`]);
-  return new Promise((resolve2) => execFile(
+  return new Promise((resolve3) => execFile(
     "systemd-run",
     ["--user", "--quiet", "--collect", `--unit=${unit}`, ...settings, executable, entry],
     { timeout: 3e3 },
-    (error) => resolve2(!error)
+    (error) => resolve3(!error)
   ));
 }
 var TelephoneClient = class extends EventEmitter {
@@ -138,19 +141,19 @@ var TelephoneClient = class extends EventEmitter {
     return this.connecting;
   }
   async ensureExchange() {
-    const deadline = Date.now() + 5e3;
+    let deadline = Date.now() + 5e3;
     let spawned = false;
     let failed;
     let backoff = 25;
     while (!this.closed) {
       try {
         const path = await clientSocketPath(this.home);
-        return await new Promise((resolve2, reject) => {
+        return await new Promise((resolve3, reject) => {
           const socket = createConnection(path);
           socket.once("error", reject);
           socket.once("connect", () => {
             socket.off("error", reject);
-            resolve2(socket);
+            resolve3(socket);
           });
         });
       } catch (error) {
@@ -168,6 +171,7 @@ var TelephoneClient = class extends EventEmitter {
             });
             child.unref();
           }
+          deadline = Date.now() + 5e3;
         }
         if (failed) throw new TelephoneError("unreachable", failed.code === "ENOENT" ? "Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH" : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError("unreachable", "Exchange did not start within 5 seconds");
@@ -237,8 +241,8 @@ var TelephoneClient = class extends EventEmitter {
     const socket = this.socket;
     if (!socket || socket.destroyed) return Promise.reject(new TelephoneError("disconnected"));
     const rid = randomUUID();
-    return new Promise((resolve2, reject) => {
-      this.requests.set(rid, { resolve: (value) => resolve2(value), reject });
+    return new Promise((resolve3, reject) => {
+      this.requests.set(rid, { resolve: (value) => resolve3(value), reject });
       try {
         writeFrame(socket, { ...body, rid });
       } catch (error) {
@@ -336,11 +340,11 @@ var TelephoneClient = class extends EventEmitter {
     let cancel = () => {
     };
     let received;
-    const reply = new Promise((resolve2, reject) => {
+    const reply = new Promise((resolve3, reject) => {
       cancel = reject;
       this.replies.set(id, { resolve: (message) => {
         received = message;
-        resolve2(message);
+        resolve3(message);
       }, reject });
     });
     const onAbort = () => cancel(new TelephoneError("aborted"));
@@ -377,8 +381,8 @@ var TelephoneClient = class extends EventEmitter {
     this.closed = true;
     clearTimeout(this.reconnectTimer);
     const socket = this.socket;
-    if (socket && !socket.destroyed) await new Promise((resolve2) => {
-      socket.once("close", resolve2);
+    if (socket && !socket.destroyed) await new Promise((resolve3) => {
+      socket.once("close", resolve3);
       socket.destroy();
     });
     await this.connecting?.catch(() => {

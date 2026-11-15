@@ -5,7 +5,7 @@ import { dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { TelephoneClient } from '../src/client.js';
 import type { InboundMessage } from '../src/protocol.js';
@@ -56,48 +56,69 @@ test('a plain Node host starts the exchange on demand through pi-telephone/host 
   }
 });
 
-test('under systemd the exchange starts in its own transient user unit, and without a working systemd-run it starts detached', { timeout: 20000 }, async t => {
+test('under systemd the exchange starts in its own transient user unit, and without a working systemd-run it starts detached', { timeout: 30000 }, async t => {
   const root = await mkdtemp('/tmp/pi-tel-systemd-');
+  const keys = ['PATH', 'FAKE_SYSTEMD_LOG', 'FAKE_SYSTEMD_FAIL', 'FAKE_SYSTEMD_STALL', 'INVOCATION_ID', 'PI_TELEPHONE_NETWORK', 'PI_TELEPHONE_IDLE_EXIT_MS'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  const clients: TelephoneClient[] = [];
+  const homes: string[] = [];
+  t.after(async () => {
+    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
+    delete (process.versions as Record<string, string>).bun;
+    await Promise.all(clients.map(client => client.close()));
+    // Stop every exchange a case may have started, also one whose client failed, and wait until it has exited.
+    for (const home of homes) {
+      const pid = Number(await readFile(paths(home).lock, 'utf8').catch(() => '0'));
+      if (!pid) continue;
+      try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; continue; }
+      for (const deadline = Date.now() + 3000; Date.now() < deadline; await sleep(25)) {
+        try { process.kill(pid, 0); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; break; }
+      }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
   const bin = `${root}/bin`, log = `${root}/systemd-run.log`;
   await mkdir(bin);
+  await mkdir(`${root}/decoy/node`, { recursive: true });
   // Records its arguments, then runs the command in the background with the --setenv values, as systemd does in a new unit.
   await writeFile(`${bin}/systemd-run`, `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_SYSTEMD_LOG"
+[ -n "$FAKE_SYSTEMD_STALL" ] && exec sleep 10
 [ -n "$FAKE_SYSTEMD_FAIL" ] && exit 1
 while [ $# -gt 0 ]; do case "$1" in --setenv=*) export "\${1#--setenv=}" ;; --*) ;; *) break ;; esac; shift; done
 nohup "$@" >/dev/null 2>&1 &
 `, { mode: 0o755 });
-  const keys = ['PATH', 'FAKE_SYSTEMD_LOG', 'FAKE_SYSTEMD_FAIL', 'INVOCATION_ID', 'PI_TELEPHONE_NETWORK', 'PI_TELEPHONE_IDLE_EXIT_MS'];
-  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
-  const clients: TelephoneClient[] = [];
-  const pids: number[] = [];
-  t.after(async () => {
-    for (const key of keys) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; }
-    await Promise.all(clients.map(client => client.close()));
-    for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; } }
-    await rm(root, { recursive: true, force: true });
-  });
-  Object.assign(process.env, { PATH: `${bin}:${previous.PATH}`, FAKE_SYSTEMD_LOG: log, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: idleExitMs });
   const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
-  async function start(name: string, env: Record<string, string | undefined>): Promise<string> {
+  // An exchange that needs 2.5 s to come up, for example with a large inbox to scan.
+  const slowEntry = `${root}/slow-exchange.mjs`;
+  await writeFile(slowEntry, `await new Promise(resolve => setTimeout(resolve, 2500));\nawait import(${JSON.stringify(pathToFileURL(entry).href)});\n`);
+  Object.assign(process.env, { PATH: `${bin}:${previous.PATH}`, FAKE_SYSTEMD_LOG: log, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: idleExitMs });
+  async function start(name: string, env: Record<string, string | undefined>, exchangeEntry = entry): Promise<string> {
     for (const [key, value] of Object.entries(env)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
     const home = `${root}/${name}`;
-    const client = new TelephoneClient({ harness: 'pi-fleet', version: 'test', home, exchangeEntry: entry, onMessage: async () => ({ accepted: true }) });
+    homes.push(home);
+    const client = new TelephoneClient({ harness: 'pi-fleet', version: 'test', home, exchangeEntry, onMessage: async () => ({ accepted: true }) });
     clients.push(client);
     await client.connect();
-    pids.push(Number(await readFile(paths(home).lock, 'utf8')));
     return home;
   }
-  const unitHome = await start('unit', { INVOCATION_ID: 'test', FAKE_SYSTEMD_FAIL: undefined });
-  const failHome = await start('fail', { INVOCATION_ID: 'test', FAKE_SYSTEMD_FAIL: '1' });
-  await start('plain', { INVOCATION_ID: undefined, FAKE_SYSTEMD_FAIL: undefined });
+  const unitHome = await start('unit', { INVOCATION_ID: 'test' });
+  const failHome = await start('fail', { FAKE_SYSTEMD_FAIL: '1' });
+  // systemd-run hangs until its 3 s timeout; the detached fallback still gets its full start window.
+  const stallHome = await start('stall', { FAKE_SYSTEMD_FAIL: undefined, FAKE_SYSTEMD_STALL: '1' }, slowEntry);
+  // A standalone Pi binary resolves node on PATH for the unit, skipping a directory named node.
+  Object.defineProperty(process.versions, 'bun', { value: '1.3.14', configurable: true });
+  const standaloneHome = await start('standalone', { FAKE_SYSTEMD_STALL: undefined, PATH: `${root}/decoy:${bin}:${dirname(process.execPath)}:${previous.PATH}` });
+  delete (process.versions as Record<string, string>).bun;
+  await start('plain', { INVOCATION_ID: undefined, PATH: `${bin}:${previous.PATH}` });
   const calls = (await readFile(log, 'utf8')).trim().split('\n');
-  assert.equal(calls.length, 2, calls.join('\n'));
-  for (const [index, home] of [unitHome, failHome].entries()) {
+  assert.equal(calls.length, 4, calls.join('\n'));
+  for (const [index, [home, executable, script]] of ([[unitHome, process.execPath, entry], [failHome, process.execPath, entry], [stallHome, process.execPath, slowEntry],
+    [standaloneHome, `${dirname(process.execPath)}/node`, entry]] as const).entries()) {
     const unit = `pi-telephone-exchange-${createHash('sha256').update(home).digest('hex').slice(0, 8)}`;
     assert.ok(calls[index].startsWith(`--user --quiet --collect --unit=${unit} `), calls[index]);
     assert.ok(calls[index].includes(` --setenv=PI_TELEPHONE_HOME=${home} `), calls[index]);
-    assert.ok(calls[index].endsWith(` ${process.execPath} ${entry}`), calls[index]);
+    assert.ok(calls[index].endsWith(` ${executable} ${script}`), calls[index]);
   }
 });
 

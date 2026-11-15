@@ -2979,7 +2979,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve4.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3006,7 +3006,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve4(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3836,7 +3836,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve4(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4205,7 +4205,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve4,
       resolveComponent,
       equal,
       serialize,
@@ -15858,7 +15858,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve3) {
+function isRecursive(inst, stack, resolve4) {
   const cached2 = recursive.get(inst);
   if (cached2 !== void 0)
     return cached2 ? PROVEN : NONE;
@@ -15868,7 +15868,7 @@ function isRecursive(inst, stack, resolve3) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve3);
+      const answer = isRecursive(child, stack, resolve4);
       if (answer > result)
         result = answer;
     }
@@ -15879,7 +15879,7 @@ function isRecursive(inst, stack, resolve3) {
       const desc = Object.getOwnPropertyDescriptor(sh, key2);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve3) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve4) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -15943,7 +15943,7 @@ function isRecursive(inst, stack, resolve3) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve3 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve4 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -34351,7 +34351,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error62) {
@@ -34368,7 +34368,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const earlyReject = (error62) => {
         reject(error62);
       };
@@ -34446,7 +34446,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve4(parseResult.data);
           }
         } catch (error62) {
           reject(error62);
@@ -34707,12 +34707,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve4, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -35803,7 +35803,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+      await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -36467,12 +36467,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve3();
+        resolve4();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve4);
       }
     });
   }
@@ -36509,11 +36509,11 @@ function normalizeMachine(value) {
 }
 
 // src/client.ts
-import { delimiter, isAbsolute, join as join2 } from "node:path";
+import { delimiter, isAbsolute, resolve as resolve2 } from "node:path";
 import { EventEmitter } from "node:events";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -36581,10 +36581,13 @@ function readFrames(socket, receive) {
 // src/client.ts
 var recentSpawns = /* @__PURE__ */ new Map();
 function findExecutable(name2, path = "") {
-  for (const directory of path.split(delimiter).filter(Boolean)) {
+  for (const directory of path.split(delimiter)) {
+    const candidate = resolve2(directory || ".", name2);
     try {
-      accessSync(join2(directory, name2), constants.X_OK);
-      return join2(directory, name2);
+      if (statSync(candidate).isFile()) {
+        accessSync(candidate, constants.X_OK);
+        return candidate;
+      }
     } catch {
     }
   }
@@ -36595,11 +36598,11 @@ function startInSystemdUnit(runtime, entry, env, home) {
   if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
   const unit = `pi-telephone-exchange-${createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
   const settings = Object.entries(env).flatMap(([key2, value]) => value === void 0 ? [] : [`--setenv=${key2}=${value}`]);
-  return new Promise((resolve3) => execFile(
+  return new Promise((resolve4) => execFile(
     "systemd-run",
     ["--user", "--quiet", "--collect", `--unit=${unit}`, ...settings, executable, entry],
     { timeout: 3e3 },
-    (error62) => resolve3(!error62)
+    (error62) => resolve4(!error62)
   ));
 }
 var TelephoneClient = class extends EventEmitter {
@@ -36628,19 +36631,19 @@ var TelephoneClient = class extends EventEmitter {
     return this.connecting;
   }
   async ensureExchange() {
-    const deadline = Date.now() + 5e3;
+    let deadline = Date.now() + 5e3;
     let spawned = false;
     let failed;
     let backoff = 25;
     while (!this.closed) {
       try {
         const path = await clientSocketPath(this.home);
-        return await new Promise((resolve3, reject) => {
+        return await new Promise((resolve4, reject) => {
           const socket = createConnection(path);
           socket.once("error", reject);
           socket.once("connect", () => {
             socket.off("error", reject);
-            resolve3(socket);
+            resolve4(socket);
           });
         });
       } catch (error62) {
@@ -36658,6 +36661,7 @@ var TelephoneClient = class extends EventEmitter {
             });
             child.unref();
           }
+          deadline = Date.now() + 5e3;
         }
         if (failed) throw new TelephoneError("unreachable", failed.code === "ENOENT" ? "Cannot start the exchange: pi-telephone needs Node.js 20 or newer on PATH" : `Cannot start the exchange: ${failed.message}`);
         if (Date.now() >= deadline) throw new TelephoneError("unreachable", "Exchange did not start within 5 seconds");
@@ -36727,8 +36731,8 @@ var TelephoneClient = class extends EventEmitter {
     const socket = this.socket;
     if (!socket || socket.destroyed) return Promise.reject(new TelephoneError("disconnected"));
     const rid = randomUUID();
-    return new Promise((resolve3, reject) => {
-      this.requests.set(rid, { resolve: (value) => resolve3(value), reject });
+    return new Promise((resolve4, reject) => {
+      this.requests.set(rid, { resolve: (value) => resolve4(value), reject });
       try {
         writeFrame(socket, { ...body, rid });
       } catch (error62) {
@@ -36826,11 +36830,11 @@ var TelephoneClient = class extends EventEmitter {
     let cancel = () => {
     };
     let received;
-    const reply = new Promise((resolve3, reject) => {
+    const reply = new Promise((resolve4, reject) => {
       cancel = reject;
       this.replies.set(id, { resolve: (message) => {
         received = message;
-        resolve3(message);
+        resolve4(message);
       }, reject });
     });
     const onAbort = () => cancel(new TelephoneError("aborted"));
@@ -36867,8 +36871,8 @@ var TelephoneClient = class extends EventEmitter {
     this.closed = true;
     clearTimeout(this.reconnectTimer);
     const socket = this.socket;
-    if (socket && !socket.destroyed) await new Promise((resolve3) => {
-      socket.once("close", resolve3);
+    if (socket && !socket.destroyed) await new Promise((resolve4) => {
+      socket.once("close", resolve4);
       socket.destroy();
     });
     await this.connecting?.catch(() => {
@@ -37005,7 +37009,7 @@ function describeAllowEntry(value) {
 
 // claude/helpers.ts
 import { homedir as homedir2 } from "node:os";
-import { resolve as resolve2 } from "node:path";
+import { resolve as resolve3 } from "node:path";
 import { readFile as readFile2 } from "node:fs/promises";
 var DAY_MS = 24 * 60 * 60 * 1e3;
 function recentInbound(messages, now) {
@@ -37037,7 +37041,7 @@ function nameCandidates(explicit, previous, fallback) {
   return [base, ...Array.from({ length: 8 }, (_, i) => `${base.slice(0, 46)}-${i + 2}`)];
 }
 function resolveFilePath(path, cwd2) {
-  return resolve2(cwd2, path === "~" ? homedir2() : path.startsWith("~/") ? homedir2() + path.slice(1) : path);
+  return resolve3(cwd2, path === "~" ? homedir2() : path.startsWith("~/") ? homedir2() + path.slice(1) : path);
 }
 async function attachedImages(files = []) {
   const images = [];
@@ -37078,7 +37082,7 @@ async function deliver(message) {
   if (!inbox) return { accepted: false, reason: noInbox };
   const text = renderInbound(message, { ownerLogin, replyHint, filesNote });
   try {
-    await new Promise((resolve3, reject) => {
+    await new Promise((resolve4, reject) => {
       const socket = createConnection2(inbox);
       socket.setTimeout(4e3, () => socket.destroy(new Error("Claude Code inbox write timed out.")));
       socket.once("error", reject);
@@ -37087,7 +37091,7 @@ async function deliver(message) {
 ${JSON.stringify({ type: "user", message: { role: "user", content: text } })}
 `, () => {
           socket.destroy();
-          resolve3();
+          resolve4();
         });
       });
     });
