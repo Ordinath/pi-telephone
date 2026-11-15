@@ -4,6 +4,7 @@ import { createConnection } from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // src/config.ts
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -17,7 +18,7 @@ function inboxPath(home) {
 function paths(home) {
   const root = homePath(home);
   const normal = join(root, "exchange.sock");
-  const socket = Buffer.byteLength(normal) <= 100 ? normal : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? "user"}`, "exchange.sock");
+  const socket = Buffer.byteLength(normal) <= 100 ? normal : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? "user"}`, `${createHash("sha256").update(root).digest("hex").slice(0, 16)}.sock`);
   return { home: root, socket, socketPath: join(root, "socket-path"), lock: join(root, "exchange.lock"), config: join(root, "config.json"), log: join(root, "exchange.log") };
 }
 async function prepareHome(home) {
@@ -236,7 +237,7 @@ var TailscaleIdentityProvider = class {
 };
 
 // src/exchange/exchange.ts
-import { randomUUID, createHash as createHash2 } from "node:crypto";
+import { randomUUID, createHash as createHash3 } from "node:crypto";
 import { createReadStream as createReadStream2 } from "node:fs";
 import { isAbsolute, join as join2 } from "node:path";
 import { chmod as chmod2, mkdir as mkdir2, open, readdir, readFile as readFile2, rename as rename2, rm, rmdir, stat, unlink } from "node:fs/promises";
@@ -244,7 +245,7 @@ import { hostname } from "node:os";
 import { createServer as createServer2 } from "node:net";
 
 // src/files.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { basename, extname, sep } from "node:path";
 function bytePrefix(text, max) {
@@ -321,7 +322,7 @@ function formatBytes(n) {
   return n < 1e3 ? `${n} B` : n < 1e6 ? `${(n / 1e3).toFixed(1)} KB` : n < 1e9 ? `${(n / 1e6).toFixed(1)} MB` : `${(n / 1e9).toFixed(1)} GB`;
 }
 async function hashFile(path) {
-  const hash = createHash("sha256");
+  const hash = createHash2("sha256");
   let size = 0, head = Buffer.alloc(0);
   for await (const chunk of createReadStream(path)) {
     size += chunk.length;
@@ -1230,7 +1231,7 @@ function createExchange(options) {
       if (request2.client?.features !== void 0 && (!Array.isArray(request2.client.features) || !request2.client.features.every((feature) => typeof feature === "string"))) throw new TelephoneError("invalid_request");
       connection.hello = true;
       connection.features = request2.client?.features;
-      return { exchange: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
+      return { exchange: { proto: PROTO_VERSION, version: VERSION, pid: process.pid, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
     }
     if (!connection.hello) throw new TelephoneError("hello_required");
     switch (request2.t) {
@@ -1399,7 +1400,7 @@ async function receiveFiles(source, files, directory, lengthError = "invalid_req
   try {
     for (const file of files) {
       const handle = await open(join2(directory, file.name), "wx", 384);
-      const hash = createHash2("sha256");
+      const hash = createHash3("sha256");
       let remaining = file.size;
       try {
         while (remaining) {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -9,7 +10,9 @@ export function inboxPath(home?: string): string { return join(homePath(home), '
 export function paths(home?: string) {
   const root = homePath(home);
   const normal = join(root, 'exchange.sock');
-  const socket = Buffer.byteLength(normal) <= 100 ? normal : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? 'user'}`, 'exchange.sock');
+  // A home too long for a Unix socket path gets its own socket under the temp directory, named after the home, so two such homes never share one.
+  const socket = Buffer.byteLength(normal) <= 100 ? normal
+    : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? 'user'}`, `${createHash('sha256').update(root).digest('hex').slice(0, 16)}.sock`);
   return { home: root, socket, socketPath: join(root, 'socket-path'), lock: join(root, 'exchange.lock'), config: join(root, 'config.json'), log: join(root, 'exchange.log') };
 }
 export async function prepareHome(home?: string): Promise<void> {

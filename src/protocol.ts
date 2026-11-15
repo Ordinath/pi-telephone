@@ -41,6 +41,8 @@ export interface TrustPatch { add?: string[]; remove?: string[] }
 export interface ExchangeInfo {
   version: string;
   proto: number;
+  /** The exchange's process id; exchanges before 0.3.2 omit it. */
+  pid?: number;
   features?: string[];
   limits?: { maxFileBytes: number; maxFiles: number };
   machine: Pick<MachineIdentity, 'fqdn' | 'short' | 'login'>;

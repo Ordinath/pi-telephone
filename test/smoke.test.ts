@@ -214,15 +214,21 @@ test('bundled daemon starts on demand, locks exclusively and removes private sta
   }
 });
 
-test('cli stop returns after the exchange has exited, and never starts one', { timeout: 20000 }, async t => {
+test('cli stop returns after the exchange has exited, never starts one, and stops only its own home', { timeout: 30000 }, async t => {
   const root = await mkdtemp('/tmp/pi-tel-stop-');
   const pids: number[] = [];
+  const sockets: string[] = [];
   t.after(async () => {
-    for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; } }
+    for (const pid of pids) {
+      try { process.kill(pid, 'SIGTERM'); } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; continue; }
+      for (const deadline = Date.now() + 3000; Date.now() < deadline && alive(pid); await sleep(25));
+    }
+    await Promise.all(sockets.map(socket => rm(socket, { force: true })));
     await rm(root, { recursive: true, force: true });
   });
   const cli = fileURLToPath(new URL('../dist/cli.mjs', import.meta.url));
-  const env = (home: string) => ({ PATH: process.env.PATH, HOME: process.env.HOME, PI_TELEPHONE_HOME: home, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: '60000' });
+  // TMPDIR passes through, so a long home's socket under the temp directory is where paths() here expects it.
+  const env = (home: string) => ({ PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, PI_TELEPHONE_HOME: home, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: '60000' });
   async function run(home: string, command: string): Promise<{ code: number | null; output: string }> {
     const child = spawn(process.execPath, [cli, command], { env: env(home), stdio: ['ignore', 'pipe', 'pipe'] });
     let output = '';
@@ -231,24 +237,43 @@ test('cli stop returns after the exchange has exited, and never starts one', { t
     const [code] = await once(child, 'exit');
     return { code, output: output.trim() };
   }
-  const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; return false; } };
+  function alive(pid: number): boolean {
+    try { process.kill(pid, 0); return true; } catch (error) { if (!isFsError(error, 'ESRCH')) throw error; return false; }
+  }
+  async function start(home: string): Promise<number> {
+    const result = await run(home, 'status');
+    const pid = Number(await readFile(paths(home).lock, 'utf8').catch(() => '0'));
+    if (pid) pids.push(pid);
+    if (paths(home).socket !== `${home}/exchange.sock`) sockets.push(paths(home).socket);
+    assert.equal(result.code, 0, result.output);
+    assert.ok(alive(pid));
+    return pid;
+  }
   // No exchange: stop says so and starts none.
   const empty = `${root}/empty`;
   assert.deepEqual(await run(empty, 'stop'), { code: 0, output: 'No exchange is running' });
   await assert.rejects(stat(paths(empty).log), { code: 'ENOENT' });
   // A running exchange: stop returns only after its process has exited.
   const home = `${root}/running`;
-  assert.equal((await run(home, 'status')).code, 0);
-  const pid = Number(await readFile(paths(home).lock, 'utf8'));
-  pids.push(pid);
-  assert.ok(alive(pid));
+  const pid = await start(home);
   assert.deepEqual(await run(home, 'stop'), { code: 0, output: 'Exchange stopped' });
   assert.equal(alive(pid), false);
-  // An exchange whose home was deleted under it cannot be reached; stop must not start and stop a new one in its place.
+  // A deleted home took its socket along, so nothing can reach that exchange; stop must not start and stop a new one in its place.
   const deleted = `${root}/deleted`;
-  assert.equal((await run(deleted, 'status')).code, 0);
-  pids.push(Number(await readFile(paths(deleted).lock, 'utf8')));
+  await start(deleted);
   await rm(deleted, { recursive: true, force: true });
   assert.deepEqual(await run(deleted, 'stop'), { code: 0, output: 'No exchange is running' });
   await assert.rejects(stat(deleted), { code: 'ENOENT' });
+  // Homes too long for a Unix socket path keep their sockets under the temp directory, one per home.
+  const [longA, longB] = ['a', 'b'].map(name => `${root}/${name.repeat(90)}`);
+  assert.notEqual(paths(longA).socket, `${longA}/exchange.sock`);
+  assert.notEqual(paths(longA).socket, paths(longB).socket);
+  const [pidA, pidB] = [await start(longA), await start(longB)];
+  assert.deepEqual(await run(longA, 'stop'), { code: 0, output: 'Exchange stopped' });
+  assert.equal(alive(pidA), false);
+  assert.ok(alive(pidB));
+  // A deleted long home leaves its socket under the temp directory, so stop still reaches that exchange and waits for it.
+  await rm(longB, { recursive: true, force: true });
+  assert.deepEqual(await run(longB, 'stop'), { code: 0, output: 'Exchange stopped' });
+  assert.equal(alive(pidB), false);
 });

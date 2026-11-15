@@ -43,10 +43,13 @@ else if (!['status', 'list', 'trust', 'untrust', 'stop'].includes(command) || ([
       case 'trust': console.log((await client.setTrustedUsers({ add: [login] })).trustedUsers.join('\n')); break;
       case 'untrust': console.log((await client.setTrustedUsers({ remove: [login] })).trustedUsers.join('\n')); break;
       case 'stop': {
-        const pid = Number(await readFile(paths().lock, 'utf8').catch(() => ''));
+        // The exchange that answered names its process; one before 0.3.2 does not, so use the pid in the home's lock.
+        const valid = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+        const pid = valid(info.pid) ?? valid(Number((await readFile(paths().lock, 'utf8').catch(() => '')).trim()));
         await client.shutdownExchange();
+        if (!pid) throw new TelephoneError('unreachable', 'Shutdown sent, but the exchange process is unknown, so its exit is not confirmed');
         // Report it stopped only once its process has exited, so a start right after this cannot find the old one still holding the lock.
-        for (const deadline = Date.now() + 5000; pid > 0 && alive(pid); await sleep(25)) {
+        for (const deadline = Date.now() + 5000; alive(pid); await sleep(25)) {
           if (Date.now() > deadline) throw new TelephoneError('unreachable', `Exchange ${pid} did not stop within 5 seconds`);
         }
         console.log('Exchange stopped');

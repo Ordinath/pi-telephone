@@ -580,7 +580,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       if (request.client?.features !== undefined && (!Array.isArray(request.client.features) || !request.client.features.every(feature => typeof feature === 'string'))) throw new TelephoneError('invalid_request');
       connection.hello = true;
       connection.features = request.client?.features;
-      return { exchange: { proto: PROTO_VERSION, version: VERSION, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
+      return { exchange: { proto: PROTO_VERSION, version: VERSION, pid: process.pid, features: FEATURES, limits: limits(), machine: machineInfo(), listening } };
     }
     if (!connection.hello) throw new TelephoneError('hello_required');
     switch (request.t) {

@@ -1,7 +1,7 @@
 // src/client.ts
 import { delimiter, isAbsolute, resolve as resolve2 } from "node:path";
 import { EventEmitter } from "node:events";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash as createHash2, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // src/config.ts
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -18,7 +19,7 @@ function homePath(home) {
 function paths(home) {
   const root = homePath(home);
   const normal = join(root, "exchange.sock");
-  const socket = Buffer.byteLength(normal) <= 100 ? normal : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? "user"}`, "exchange.sock");
+  const socket = Buffer.byteLength(normal) <= 100 ? normal : join(tmpdir(), `pi-telephone-${process.getuid?.() ?? "user"}`, `${createHash("sha256").update(root).digest("hex").slice(0, 16)}.sock`);
   return { home: root, socket, socketPath: join(root, "socket-path"), lock: join(root, "exchange.lock"), config: join(root, "config.json"), log: join(root, "exchange.log") };
 }
 async function clientSocketPath(home) {
@@ -102,7 +103,7 @@ function findExecutable(name, path = "") {
 function startInSystemdUnit(runtime, entry, env, home) {
   const executable = isAbsolute(runtime) ? runtime : findExecutable(runtime, env.PATH);
   if (!process.env.INVOCATION_ID || !executable) return Promise.resolve(false);
-  const unit = `pi-telephone-exchange-${createHash("sha256").update(home).digest("hex").slice(0, 8)}`;
+  const unit = `pi-telephone-exchange-${createHash2("sha256").update(home).digest("hex").slice(0, 8)}`;
   const settings = Object.entries(env).flatMap(([key, value]) => value === void 0 ? [] : [`--setenv=${key}=${value}`]);
   return new Promise((resolve3) => execFile(
     "systemd-run",
