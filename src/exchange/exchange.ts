@@ -12,8 +12,8 @@ import type { IdentityProvider } from '../identity.js';
 import { readFrames, writeFrame } from '../ndjson.js';
 import { allows, isTrusted, validateAllow, type Caller } from '../policy.js';
 import {
-  FEATURES, PROTO_VERSION, VERSION, TelephoneError, isUuid,
-  type FileInfo, type ReceivedFile, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage, type MachineIdentity,
+  FEATURES, PROTO_VERSION, VERSION, TelephoneError, isUuid, wireHarness,
+  type FileInfo, type ReceivedFile, type Config, type Directory, type ExchangeInfo, type InboundMessage, type MachineIdentity,
   type NetworkDelivery, type NetworkDirectory, type NetworkHello, type Request, type Session, type SessionStatus,
 } from '../protocol.js';
 import { closeServer, listen, networkServer, peerRequest, type HttpInput, type HttpOutput } from './http.js';
@@ -234,7 +234,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       if (state?.reason) { warnings.push(`${peer.short}: ${state.reason}`); return; }
       try {
         const endpoint = peerEndpoints.get(peer.fqdn);
-        const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ''}`, 5000, undefined, 1500);
+        const result = await remote<NetworkDirectory>(endpoint?.ip ?? ipv4(peer)!, endpoint?.port ?? config.port, `/v1/directory?features=any-harness${caller.session ? `&as=${encodeURIComponent(caller.session)}` : ''}`, 5000, undefined, 1500);
         const machine = displayMachine(peer, self, all);
         if (!Array.isArray(result.sessions)) throw new TelephoneError('unreachable', 'Invalid peer directory');
         for (const session of result.sessions) {
@@ -319,8 +319,10 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
     ledger.set(request.id, { at: now(), fromSessionKey: sender.session.key, to: route });
     prune();
     if (request.expectReply && !pending.cancelled) waits.set(request.id, { at: now(), sessionKey: sender.session.key, to: route });
+    // A peer that has not shown it accepts every harness name gets a legacy one; a file send corrects it after its fresh hello.
+    const harness = route.local ? sender.session.harness : wireHarness(sender.session.harness, discovery.get(route.machine.fqdn)?.hello?.features);
     const message: NetworkDelivery = {
-      proto: PROTO_VERSION, id: request.id, from: { session: sender.session.name, harness: sender.session.harness },
+      proto: PROTO_VERSION, id: request.id, from: { session: sender.session.name, harness },
       fromPort: options.port, to: { session: route.session }, text: request.text, expectReply: request.expectReply === true, replyTo, sentAt: new Date(now()).toISOString(),
       ...(files ? { files } : {}),
     };
@@ -342,6 +344,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
           const version = typeof hello.version === 'string' && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : 'unknown';
           if (!Array.isArray(hello.features) || !hello.features.includes('files')) throw new TelephoneError('peer_unsupported', `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
           if (hello.proto !== PROTO_VERSION) throw new TelephoneError('proto_mismatch');
+          message.from.harness = wireHarness(sender.session.harness, hello.features);
           const peerLimits = hello.limits;
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every(value => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError('peer_unsupported', 'Peer does not advertise valid file limits.');
           const total = files.reduce((sum, file) => sum + file.size, 0);
@@ -392,7 +395,7 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       }
     }
     if (body.files) {
-      if (!target.features?.includes('files')) throw new TelephoneError('recipient_unsupported', 'The recipient session runs an older pi-telephone and cannot receive files until it restarts.');
+      if (!target.features?.includes('files')) throw new TelephoneError('recipient_unsupported', 'The recipient session does not accept files; a session on an older pi-telephone does after a restart.');
       await pruneInbox();
       const total = body.files.reduce((sum, file) => sum + file.size, 0);
       const reserved = [...reservations.values()].reduce((sum, size) => sum + size, 0);
@@ -547,7 +550,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
       return { body: { sessions: [...names.values()].flatMap(connection => {
         const registration = registered(connection);
         if (!allows(registration.allow, caller, self.login, self.fqdn)) return [];
-        return [{ session: registration.session.name, harness: registration.session.harness, status: registration.status,
+        // 0.2.x requesters send no features and drop entries with harness names they do not know.
+        return [{ session: registration.session.name, harness: wireHarness(registration.session.harness, input.url.searchParams.get('features')?.split(',')), status: registration.status,
           ...(machine.login.toLowerCase() === self.login.toLowerCase() ? { cwd: registration.session.cwd } : {}) }];
       }) } };
     }
@@ -670,7 +674,8 @@ export function createExchange(options: ExchangeOptions): { start(): Promise<voi
   return { start, stop };
 }
 function isObject(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function validHarness(value: unknown): value is Harness { return value === 'pi' || value === 'claude-code' || value === 'cli'; }
+// Any well-formed name, so a newer host's sessions register here and pass through to peers.
+function validHarness(value: unknown): value is string { return typeof value === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(value); }
 function validateDelivery(value: unknown): NetworkDelivery {
   if (!isObject(value) || !isObject(value.from) || !isObject(value.to) || !validName(value.from.session) || !validName(value.to.session) ||
       !validHarness(value.from.harness) || typeof value.text !== 'string' || typeof value.expectReply !== 'boolean' ||

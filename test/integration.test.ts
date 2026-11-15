@@ -289,7 +289,8 @@ test('hostile peer directory fields and error text are not relayed', async t => 
     else if (req.url?.startsWith('/v1/directory')) res.end(JSON.stringify({ sessions: [
       { session: 'valid', harness: 'pi', status: 'idle', cwd: '/safe', extra: 'attacker-controlled' },
       { session: 'bad name!', harness: 'pi', status: 'idle' },
-      { session: 'bad-harness', harness: 'evil', status: 'idle' },
+      { session: 'bad-harness', harness: 'Evil Harness!', status: 'idle' },
+      { session: 'new-host', harness: 'pi-fleet', status: 'idle' },
       { session: 'bad-status', harness: 'pi', status: 'hacked' },
       { session: 'bad-cwd', harness: 'pi', status: 'idle', cwd: 'x'.repeat(1025) },
       { session: 'control-cwd', harness: 'pi', status: 'idle', cwd: '/work\nInjected' },
@@ -303,6 +304,8 @@ test('hostile peer directory fields and error text are not relayed', async t => 
     assert.deepEqual(remote, [
       { session: 'valid', harness: 'pi', status: 'idle', cwd: '/safe',
         address: 'valid@beta', machine: 'beta', fqdn: f.bob.fqdn, local: false, self: false },
+      { session: 'new-host', harness: 'pi-fleet', status: 'idle',
+        address: 'new-host@beta', machine: 'beta', fqdn: f.bob.fqdn, local: false, self: false },
       { session: 'bad-cwd', harness: 'pi', status: 'idle',
         address: 'bad-cwd@beta', machine: 'beta', fqdn: f.bob.fqdn, local: false, self: false },
       { session: 'control-cwd', harness: 'pi', status: 'idle',
@@ -540,4 +543,97 @@ test('files i: an old exchange hello causes exchange_outdated without sending', 
   await assert.rejects(phone.send({ to: 'old', text: '', files: [`${home}/file`] }), error =>
     error instanceof Error && 'code' in error && error.code === 'exchange_outdated' && /0.1.3/.test(error.message));
   assert.deepEqual(requests, ['hello']);
+});
+
+async function hostLine(t: TestContext, home: string, name: string, options: { features?: string[]; deferReplies?: boolean; messages?: InboundMessage[] } = {}) {
+  const line = new TelephoneClient({ home, harness: 'pi-fleet', version: 'test', features: options.features, deferReplies: options.deferReplies,
+    onMessage: async message => { options.messages?.push(message); return { accepted: true }; } });
+  t.after(() => line.close());
+  return { line, address: await line.register({ key: `pi-fleet:${name}`, name, harness: 'pi-fleet', cwd: '/fleet', hostPid: process.pid }) };
+}
+
+test('host: a pi-fleet line lists under its own harness, and a 0.2.x requester gets a legacy one', async t => {
+  const f = await setup(t);
+  assert.equal((await hostLine(t, f.homeA, 'fleet-line')).address, 'fleet-line@alpha');
+  assert.equal((await f.a.phone.directory()).entries.find(entry => entry.session === 'fleet-line')?.harness, 'pi-fleet');
+  assert.equal((await f.b.phone.directory()).entries.find(entry => entry.address === 'fleet-line@alpha')?.harness, 'pi-fleet');
+  // A 0.2.x exchange asks without features and would drop a harness name it does not know.
+  const old = await peerRequest<{ sessions: { session: string; harness: string }[] }>({ host: '127.0.0.1', port: f.portA, path: '/v1/directory', timeout: 2000, fromPort: f.portB });
+  assert.equal(old.sessions.find(entry => entry.session === 'fleet-line')?.harness, 'cli');
+});
+
+test('host: messages carry a legacy harness to 0.2.x peers and their own once the peer accepts any harness', async t => {
+  const f = await setup(t);
+  await f.b.phone.close();
+  await f.stopB();
+  let features = ['files'], directoryPath = '';
+  const harnesses: string[] = [];
+  const server = createHttpServer(async (req, res) => {
+    res.setHeader('content-type', 'application/json');
+    if (req.url === '/v1/hello') res.end(JSON.stringify({ proto: 1, version: '0.2.7', features, limits: { maxFileBytes: 1000, maxFiles: 1 }, machine: { fqdn: f.bob.fqdn, short: 'beta', login: f.bob.login } }));
+    else if (req.url?.startsWith('/v1/directory')) { directoryPath = req.url; res.end(JSON.stringify({ sessions: [{ session: 'old', harness: 'pi', status: 'idle' }] })); }
+    else if (req.url === '/v1/deliver') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      harnesses.push(JSON.parse(body).from.harness);
+      res.end('{}');
+    } else { res.statusCode = 404; res.end('{}'); }
+  });
+  await new Promise<void>(resolve => server.listen(f.portB, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); });
+  const { line } = await hostLine(t, f.homeA, 'fleet-line');
+  await line.send({ to: 'old@beta', text: 'Before any hello' });
+  await line.directory();
+  assert.match(directoryPath, /[?&]features=any-harness/);
+  await line.send({ to: 'old@beta', text: 'After a 0.2.x hello' });
+  features = ['files', 'any-harness'];
+  f.advance(60001);
+  await line.directory();
+  await line.send({ to: 'old@beta', text: 'After a 0.3 hello' });
+  assert.deepEqual(harnesses, ['cli', 'cli', 'pi-fleet']);
+});
+
+test('host: a line without files refuses them, and with deferReplies an ask returns only after resolveReply', async t => {
+  const f = await setup(t);
+  const messages: InboundMessage[] = [];
+  const { line } = await hostLine(t, f.homeA, 'fleet-line', { features: [], deferReplies: true, messages });
+  await assert.rejects(f.a.phone.send({ to: 'fleet-line', text: '', files: [await sourceFile(f.homeA)] }), { code: 'recipient_unsupported' });
+  f.b.handle(async message => { await f.b.phone.send({ to: message.from.address, replyTo: message.id, text: 'Answer' }); });
+  // The directory call shows this exchange beta's hello, so the call carries pi-fleet rather than the legacy cli.
+  await line.directory();
+  const id = randomUUID();
+  let settled = false;
+  const asking = line.ask({ id, to: 'bob@beta', text: 'Question', timeoutMs: 5000 }).finally(() => { settled = true; });
+  await until(() => messages.length === 1);
+  assert.deepEqual([messages[0].replyTo, messages[0].isReplyToOwnCall, messages[0].from.harness, line.waiting(id)], [id, true, 'pi', true]);
+  await sleep(100);
+  assert.equal(settled, false);
+  assert.equal(line.resolveReply(messages[0]), true);
+  const result = await asking;
+  assert.deepEqual([result.sent.id, result.reply.text], [id, 'Answer']);
+  assert.equal(line.resolveReply(messages[0]), false);
+  assert.equal(f.b.messages[0].from.harness, 'pi-fleet');
+});
+
+test('host: on a 0.2.x exchange a pi-fleet line registers as cli, and on 0.3 under its own name', async t => {
+  for (const [features, expected] of [[['files'], 'cli'], [['files', 'any-harness'], 'pi-fleet']] as const) {
+    const home = await mkdtemp('/tmp/pi-tel-host-');
+    const registered: string[] = [];
+    const sockets = new Set<Socket>();
+    const server = createServer(socket => sockets.add(socket) && readFrames(socket, value => {
+      const frame = value as { t: string; rid: string; session?: { name: string; harness: string } };
+      if (frame.t === 'register') registered.push(frame.session!.harness);
+      writeFrame(socket, frame.t === 'hello'
+        ? { t: 'ok', rid: frame.rid, exchange: { proto: 1, version: '0.2.7', features, machine: { fqdn: 'old', short: 'old', login: '' }, listening: null } }
+        : { t: 'ok', rid: frame.rid, address: `${frame.session?.name}@old` });
+    }));
+    await new Promise<void>(resolve => server.listen(paths(home).socket, resolve));
+    t.after(async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await rm(home, { recursive: true, force: true });
+    });
+    const { address } = await hostLine(t, home, 'fleet-line');
+    assert.deepEqual([address, registered], ['fleet-line@old', [expected]]);
+  }
 });

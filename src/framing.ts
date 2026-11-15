@@ -7,7 +7,7 @@ export function renderInbound(message: InboundMessage, opts: { replyHint: string
   const own = from.local || (!!opts.ownerLogin && from.login.toLowerCase() === opts.ownerLogin.toLowerCase());
   const displayName = from.displayName?.replace(/[\x00-\x1f\x7f-\x9f]/g, '').slice(0, 100);
   const person = own ? "one of your user's own sessions" : [displayName, from.login].filter(Boolean).join(', ');
-  const harness = from.harness === 'claude-code' ? 'Claude Code' : from.harness === 'pi' ? 'Pi' : from.harness === 'cli' ? 'CLI' : undefined;
+  const harness = from.harness === 'claude-code' ? 'Claude Code' : from.harness === 'pi' ? 'Pi' : from.harness === 'cli' ? 'CLI' : from.harness;
   const detail = [person, harness && `via ${harness}`].filter(Boolean).join(', ');
   const idLine = `${message.isReplyToOwnCall && message.replyTo ? `Reply to your call ${message.replyTo}` : `Message id ${message.id}`}${message.expectReply ? '  ·  expects a reply' : ''}`;
   const nonce = randomBytes(8).toString('hex');

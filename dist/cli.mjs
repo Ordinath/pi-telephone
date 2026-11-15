@@ -73,8 +73,12 @@ function readFrames(socket, receive) {
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var FEATURES = ["files"];
-var VERSION = false ? "0.2.7" : "0.2.7";
+var CLIENT_FEATURES = ["files"];
+var VERSION = false ? "0.3.0" : "0.3.0";
+var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
+function wireHarness(harness, features) {
+  return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
+}
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -84,6 +88,7 @@ var TelephoneError = class extends Error {
 };
 
 // src/client.ts
+var recentSpawns = /* @__PURE__ */ new Map();
 var TelephoneClient = class extends EventEmitter {
   constructor(opts) {
     super();
@@ -127,7 +132,8 @@ var TelephoneClient = class extends EventEmitter {
         });
       } catch (error) {
         if (!isFsError(error, "ENOENT") && !isFsError(error, "ECONNREFUSED")) throw error;
-        if (!spawned) {
+        if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2e3) {
+          recentSpawns.set(this.home, Date.now());
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL("../dist/exchange.mjs", import.meta.url));
           const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => ["PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG"].includes(key) || key.startsWith("PI_TELEPHONE_")));
           const runtime = process.versions.bun || process.getBuiltinModule?.("node:sea")?.isSea() ? "node" : process.execPath;
@@ -173,9 +179,9 @@ var TelephoneClient = class extends EventEmitter {
       void this.receive(value, socket).catch(() => socket.destroy());
     });
     try {
-      const result = await this.request({ t: "hello", proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: FEATURES } });
+      const result = await this.request({ t: "hello", proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: this.opts.features ?? CLIENT_FEATURES } });
       if (this.registration) {
-        await this.request({ t: "register", session: this.registration.session, allow: this.registration.allow });
+        await this.request({ t: "register", session: this.wireSession(this.registration.session, result.exchange), allow: this.registration.allow });
         if (this.registration.status) await this.request({ t: "update", status: this.registration.status });
       }
       this.info = result.exchange;
@@ -195,8 +201,9 @@ var TelephoneClient = class extends EventEmitter {
     if (this.closed || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = void 0;
-      void this.connect().catch(() => {
+      void this.connect().catch((error) => {
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5e3);
+        this.emit("retrying", error);
         this.scheduleReconnect();
       });
     }, this.reconnectDelay);
@@ -218,7 +225,7 @@ var TelephoneClient = class extends EventEmitter {
   async receive(frame, socket) {
     if (frame.t === "deliver") {
       const message = frame.message;
-      const wait = message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : void 0;
+      const wait = !this.opts.deferReplies && message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : void 0;
       let ack;
       if (wait) {
         this.replies.delete(message.replyTo);
@@ -243,9 +250,25 @@ var TelephoneClient = class extends EventEmitter {
       request.resolve(result);
     }
   }
+  // A 0.2.x exchange refuses harness names it does not know, so such a line registers as 'cli' until the exchange restarts.
+  wireSession(session, exchange) {
+    return { ...session, harness: wireHarness(session.harness, exchange.features) };
+  }
+  /** With deferReplies: true when an ask of this client waits for message id `id`. */
+  waiting(id) {
+    return this.replies.has(id);
+  }
+  /** With deferReplies: hand a reply to the ask that waits for it; false when none waits. */
+  resolveReply(message) {
+    const wait = message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : void 0;
+    if (!wait) return false;
+    this.replies.delete(message.replyTo);
+    wait.resolve(message);
+    return true;
+  }
   async register(session, allow = ["owner"]) {
-    await this.connect();
-    const result = await this.request({ t: "register", session, allow });
+    const exchange = await this.connect();
+    const result = await this.request({ t: "register", session: this.wireSession(session, exchange), allow });
     this.registration = { session: { ...session }, allow: [...allow] };
     return result.address;
   }
@@ -276,13 +299,15 @@ var TelephoneClient = class extends EventEmitter {
   }
   async send(input) {
     await this.connect();
-    return this.request({ t: "send", id: randomUUID(), ...input, files: this.fileInputs(input.files) });
+    return this.request({ t: "send", ...input, id: input.id ?? randomUUID(), files: this.fileInputs(input.files) });
   }
+  /** `id` lets the host know the call's message id before the reply arrives; it must be a fresh UUID. */
   async ask(input) {
     await this.connect();
     const files = this.fileInputs(input.files);
     if (input.signal?.aborted) throw new TelephoneError("aborted");
-    const id = randomUUID();
+    const id = input.id ?? randomUUID();
+    if (this.replies.has(id)) throw new TelephoneError("invalid_id");
     let cancel = () => {
     };
     let received;

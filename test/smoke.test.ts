@@ -10,6 +10,49 @@ import { TelephoneClient } from '../src/client.js';
 import type { InboundMessage } from '../src/protocol.js';
 import { paths, isFsError } from '../src/config.js';
 
+// The exchange gives a client this long to connect before it exits idle; shorter windows race the client's polling.
+// A plain Node process, as pi-fleet's core is: no Pi, no tsx, only the published pi-telephone/host export.
+const hostScript = `
+import { TelephoneClient } from 'pi-telephone/host';
+const received = [];
+const line = (name, onMessage) => {
+  const client = new TelephoneClient({ harness: 'pi-fleet', version: 'smoke', features: [], onMessage });
+  return { client, address: client.register({ key: 'pi-fleet:' + name, name, harness: 'pi-fleet', cwd: process.cwd(), hostPid: process.pid }) };
+};
+const a = line('line-a', async () => ({ accepted: true }));
+const b = line('line-b', async message => { received.push(message); return { accepted: true }; });
+const addresses = await Promise.all([a.address, b.address]);
+await a.client.send({ to: 'line-b', text: 'Hello' });
+while (!received.length) await new Promise(resolve => setTimeout(resolve, 10));
+const entries = (await a.client.directory()).entries.map(entry => [entry.address, entry.harness]);
+await Promise.all([a.client.close(), b.client.close()]);
+console.log(JSON.stringify({ addresses, from: [received[0].from.session, received[0].from.harness, received[0].from.local], entries }));
+`;
+
+test('a plain Node host starts the exchange on demand through pi-telephone/host and runs two lines from one process', { timeout: 15000 }, async t => {
+  const home = await mkdtemp('/tmp/pi-tel-host-');
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const child = spawn(process.execPath, ['--input-type=module', '-e', hostScript], {
+    cwd: fileURLToPath(new URL('..', import.meta.url)), stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, PI_TELEPHONE_HOME: home, PI_TELEPHONE_NETWORK: 'off', PI_TELEPHONE_IDLE_EXIT_MS: '1500' },
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const [code] = await once(child, 'exit');
+  assert.equal(code, 0, output);
+  const result = JSON.parse(output);
+  assert.deepEqual(result.addresses.map((address: string) => address.split('@')[0]), ['line-a', 'line-b']);
+  assert.deepEqual(result.from, ['line-a', 'pi-fleet', true]);
+  assert.deepEqual(result.entries.map(([, harness]: string[]) => harness), ['pi-fleet', 'pi-fleet']);
+  // The exchange outlives its host process and exits on its own once idle.
+  const deadline = Date.now() + 5000;
+  while ((await stat(paths(home).lock).then(() => true, error => { if (!isFsError(error, 'ENOENT')) throw error; return false; }))) {
+    if (Date.now() > deadline) assert.fail('Exchange did not exit after its lines closed');
+    await sleep(25);
+  }
+});
+
 test('inside a standalone Pi binary the daemon starts with node from PATH, and a missing node is reported at once', { timeout: 15000 }, async t => {
   const home = await mkdtemp('/tmp/pi-tel-standalone-');
   const previous = { execPath: process.execPath, path: process.env.PATH, network: process.env.PI_TELEPHONE_NETWORK, idle: process.env.PI_TELEPHONE_IDLE_EXIT_MS };
@@ -18,7 +61,7 @@ test('inside a standalone Pi binary the daemon starts with node from PATH, and a
   process.execPath = '/usr/bin/false';
   process.env.PATH = `${dirname(previous.execPath)}:${previous.path}`;
   process.env.PI_TELEPHONE_NETWORK = 'off';
-  process.env.PI_TELEPHONE_IDLE_EXIT_MS = '200';
+  process.env.PI_TELEPHONE_IDLE_EXIT_MS = '1500';
   const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
   const onMessage = async () => ({ accepted: true });
   const client = new TelephoneClient({ harness: 'pi', version: 'test', home: `${home}/a`, exchangeEntry: entry, onMessage });
@@ -50,7 +93,7 @@ test('bundled daemon starts on demand, locks exclusively and removes private sta
   const previous = { home: process.env.PI_TELEPHONE_HOME, network: process.env.PI_TELEPHONE_NETWORK, idle: process.env.PI_TELEPHONE_IDLE_EXIT_MS };
   process.env.PI_TELEPHONE_HOME = home;
   process.env.PI_TELEPHONE_NETWORK = 'off';
-  process.env.PI_TELEPHONE_IDLE_EXIT_MS = '200';
+  process.env.PI_TELEPHONE_IDLE_EXIT_MS = '1500';
   const entry = fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
   const client = new TelephoneClient({ harness: 'pi', version: 'test', exchangeEntry: entry, onMessage: async () => ({ accepted: true }) });
   const messages: InboundMessage[] = [];

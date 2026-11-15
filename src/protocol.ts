@@ -1,8 +1,16 @@
 export const PROTO_VERSION = 1;
-export const FEATURES = ['files'];
+// What an exchange supports. 'any-harness': it accepts every well-formed harness name, not only the three of 0.2.x.
+export const FEATURES = ['files', 'any-harness'];
+// What a session client can receive, unless its host says otherwise.
+export const CLIENT_FEATURES = ['files'];
 declare const __PACKAGE_VERSION__: string;
-export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.2.7' : __PACKAGE_VERSION__;
-export type Harness = 'pi' | 'claude-code' | 'cli';
+export const VERSION = typeof __PACKAGE_VERSION__ === 'undefined' ? '0.3.0' : __PACKAGE_VERSION__;
+export type Harness = 'pi' | 'claude-code' | 'cli' | 'pi-fleet';
+const LEGACY_HARNESSES = ['pi', 'claude-code', 'cli'];
+// The harness name an exchange with these features accepts; 0.2.x exchanges refuse any but the legacy three.
+export function wireHarness(harness: string, features: readonly string[] | undefined): string {
+  return features?.includes('any-harness') || LEGACY_HARNESSES.includes(harness) ? harness : 'cli';
+}
 export type SessionStatus = 'idle' | 'busy';
 export interface MachineIdentity {
   fqdn: string;
@@ -43,7 +51,7 @@ export interface DirectoryEntry {
   session: string;
   machine: string;
   fqdn: string;
-  harness: Harness;
+  harness: string;
   status: SessionStatus;
   cwd?: string;
   local: boolean;
@@ -62,7 +70,7 @@ export interface InboundMessage {
     fqdn: string;
     login: string;
     displayName?: string;
-    harness?: Harness;
+    harness?: string;
     local: boolean;
   };
   text: string;
@@ -71,7 +79,7 @@ export interface InboundMessage {
   isReplyToOwnCall: boolean;
   sentAt: string;
 }
-export interface SendInput { to?: string; text: string; replyTo?: string; files?: string[] }
+export interface SendInput { id?: string; to?: string; text: string; replyTo?: string; files?: string[] }
 export interface SendResult { id: string; status: 'delivered'; to: string; inferredReplyTo?: string; files?: FileInfo[] }
 export interface Ack { t: 'ack'; id: string; accepted: boolean; reason?: string }
 export type Request = { rid: string } & (
@@ -92,7 +100,7 @@ export interface NetworkDelivery {
   files?: FileInfo[];
   proto: number;
   id: string;
-  from: { session: string; harness: Harness };
+  from: { session: string; harness: string };
   fromPort: number;
   to: { session: string };
   text: string;
@@ -108,7 +116,7 @@ export interface NetworkHello {
   machine: ExchangeInfo['machine'];
 }
 export interface NetworkDirectory {
-  sessions: { session: string; harness: Harness; status: SessionStatus; cwd?: string }[];
+  sessions: { session: string; harness: string; status: SessionStatus; cwd?: string }[];
 }
 export class TelephoneError extends Error {
   constructor(public readonly code: string, message = code) {

@@ -1,6 +1,6 @@
 {
   "name": "pi-telephone",
-  "version": "0.2.7",
+  "version": "0.3.0",
   "description": "Agent sessions call each other across machines on your Tailscale network, in Pi and Claude Code.",
   "license": "MIT",
   "author": "Nikita Sklyarov",
@@ -42,8 +42,15 @@
   "bin": {
     "pi-telephone": "dist/cli.mjs"
   },
+  "exports": {
+    "./host": {
+      "types": "./dist/types/host.d.ts",
+      "default": "./dist/host.mjs"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
-    "build": "node build.mjs",
+    "build": "node build.mjs && tsc -p tsconfig.types.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"

@@ -1,12 +1,15 @@
 import { build } from 'esbuild';
-import { readFile, chmod } from 'node:fs/promises';
+import { readFile, chmod, rm } from 'node:fs/promises';
 
 const { version } = JSON.parse(await readFile(new URL('./package.json', import.meta.url), 'utf8'));
 const entries = [
   ['src/exchange/main.ts', 'dist/exchange.mjs'],
   ['src/cli.ts', 'dist/cli.mjs'],
   ['claude/server.ts', 'dist/claude-mcp.mjs'],
+  ['src/host.ts', 'dist/host.mjs'],
 ];
+// The npm build script regenerates the declarations of pi-telephone/host here with tsconfig.types.json.
+await rm('dist/types', { recursive: true, force: true });
 for (const [entry, outfile] of entries) {
   await build({
     entryPoints: [entry], outfile, bundle: true, platform: 'node', format: 'esm', target: 'node20',

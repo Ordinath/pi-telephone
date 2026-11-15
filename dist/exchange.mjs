@@ -76,8 +76,12 @@ import { isIP } from "node:net";
 
 // src/protocol.ts
 var PROTO_VERSION = 1;
-var FEATURES = ["files"];
-var VERSION = false ? "0.2.7" : "0.2.7";
+var FEATURES = ["files", "any-harness"];
+var VERSION = false ? "0.3.0" : "0.3.0";
+var LEGACY_HARNESSES = ["pi", "claude-code", "cli"];
+function wireHarness(harness, features) {
+  return features?.includes("any-harness") || LEGACY_HARNESSES.includes(harness) ? harness : "cli";
+}
 var TelephoneError = class extends Error {
   constructor(code, message = code) {
     super(message);
@@ -804,7 +808,7 @@ function createExchange(options) {
       }
       try {
         const endpoint = peerEndpoints.get(peer.fqdn);
-        const result = await remote(endpoint?.ip ?? ipv4(peer), endpoint?.port ?? config.port, `/v1/directory${caller.session ? `?as=${encodeURIComponent(caller.session)}` : ""}`, 5e3, void 0, 1500);
+        const result = await remote(endpoint?.ip ?? ipv4(peer), endpoint?.port ?? config.port, `/v1/directory?features=any-harness${caller.session ? `&as=${encodeURIComponent(caller.session)}` : ""}`, 5e3, void 0, 1500);
         const machine2 = displayMachine(peer, self, all);
         if (!Array.isArray(result.sessions)) throw new TelephoneError("unreachable", "Invalid peer directory");
         for (const session of result.sessions) {
@@ -900,10 +904,11 @@ function createExchange(options) {
     ledger.set(request2.id, { at: now(), fromSessionKey: sender.session.key, to: route });
     prune();
     if (request2.expectReply && !pending.cancelled) waits.set(request2.id, { at: now(), sessionKey: sender.session.key, to: route });
+    const harness = route.local ? sender.session.harness : wireHarness(sender.session.harness, discovery.get(route.machine.fqdn)?.hello?.features);
     const message = {
       proto: PROTO_VERSION,
       id: request2.id,
-      from: { session: sender.session.name, harness: sender.session.harness },
+      from: { session: sender.session.name, harness },
       fromPort: options.port,
       to: { session: route.session },
       text: request2.text,
@@ -928,6 +933,7 @@ function createExchange(options) {
           const version = typeof hello.version === "string" && /^[\w.+-]{1,64}$/.test(hello.version) ? hello.version : "unknown";
           if (!Array.isArray(hello.features) || !hello.features.includes("files")) throw new TelephoneError("peer_unsupported", `${route.machine.short} runs pi-telephone ${version}, which cannot receive files; it needs 0.2.0 or later. Text messages still work.`);
           if (hello.proto !== PROTO_VERSION) throw new TelephoneError("proto_mismatch");
+          message.from.harness = wireHarness(sender.session.harness, hello.features);
           const peerLimits = hello.limits;
           if (!peerLimits || ![peerLimits.maxFileBytes, peerLimits.maxFiles].every((value) => Number.isSafeInteger(value) && value > 0)) throw new TelephoneError("peer_unsupported", "Peer does not advertise valid file limits.");
           const total = files.reduce((sum, file) => sum + file.size, 0);
@@ -989,7 +995,7 @@ function createExchange(options) {
       }
     }
     if (body.files) {
-      if (!target.features?.includes("files")) throw new TelephoneError("recipient_unsupported", "The recipient session runs an older pi-telephone and cannot receive files until it restarts.");
+      if (!target.features?.includes("files")) throw new TelephoneError("recipient_unsupported", "The recipient session does not accept files; a session on an older pi-telephone does after a restart.");
       await pruneInbox();
       const total = body.files.reduce((sum, file) => sum + file.size, 0);
       const reserved = [...reservations.values()].reduce((sum, size) => sum + size, 0);
@@ -1191,7 +1197,7 @@ function createExchange(options) {
         if (!allows(registration.allow, caller, self.login, self.fqdn)) return [];
         return [{
           session: registration.session.name,
-          harness: registration.session.harness,
+          harness: wireHarness(registration.session.harness, input.url.searchParams.get("features")?.split(",")),
           status: registration.status,
           ...machine2.login.toLowerCase() === self.login.toLowerCase() ? { cwd: registration.session.cwd } : {}
         }];
@@ -1348,7 +1354,7 @@ function isObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function validHarness(value) {
-  return value === "pi" || value === "claude-code" || value === "cli";
+  return typeof value === "string" && /^[a-z][a-z0-9-]{0,31}$/.test(value);
 }
 function validateDelivery(value) {
   if (!isObject(value) || !isObject(value.from) || !isObject(value.to) || !validName(value.from.session) || !validName(value.to.session) || !validHarness(value.from.harness) || typeof value.text !== "string" || typeof value.expectReply !== "boolean" || typeof value.sentAt !== "string" || !Number.isFinite(Date.parse(value.sentAt)) || typeof value.fromPort !== "number" || !Number.isInteger(value.fromPort) || value.fromPort < 1 || value.fromPort > 65535) throw new TelephoneError("invalid_request");

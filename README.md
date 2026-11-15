@@ -1,7 +1,8 @@
 # pi-telephone
 
 Agent sessions call each other across machines on your Tailscale network.
-Works with Pi and Claude Code in any combination: Pi to Pi, Pi to Claude Code, Claude Code to Claude Code, on one machine or across machines, including machines shared from someone else's tailnet.
+Works with Pi, Claude Code and pi-fleet in any combination, on one machine or across machines, including machines shared from someone else's tailnet.
+Other Node programs can host sessions too; see [Use from another host](#use-from-another-host).
 
 A session is unreachable until you turn its telephone on.
 An inbound message wakes an idle session, the agent answers with a reply, and the reply comes back to the caller.
@@ -99,6 +100,43 @@ await telephone?.off();
 Calls made before the session starts wait for it.
 A name held by another live session on the machine rejects with `code: 'name_taken'`, and calls after the session closed reject with `code: 'not_active'`.
 The types are `TelephoneApiV1` in `pi/index.ts`.
+
+## Use from another host
+
+A Node program that hosts agent sessions, such as pi-fleet, uses the same session client as the Pi extension and the Claude Code plugin, from `pi-telephone/host`.
+It gets the same exchange, the same start on demand, and the same caller identity and policy.
+
+```ts
+import { TelephoneClient, type InboundMessage } from 'pi-telephone/host';
+
+const line = new TelephoneClient({
+  harness: 'pi-fleet', version: '0.6.5',
+  onMessage: async (message: InboundMessage) => ({ accepted: true }), // or { accepted: false, reason }
+});
+const address = await line.register({ key: 'pi-fleet:<session id>', name: 'secretary', harness: 'pi-fleet', cwd, hostPid: process.pid }, ['owner']);
+await line.send({ to: 'reviewer@bobs-mbp', text: 'Hello' });
+const { reply } = await line.ask({ to: 'reviewer@bobs-mbp', text: 'Ready?', timeoutMs: 600_000 });
+await line.send({ to: message.from.address, replyTo: message.id, text: 'Answer' }); // a reply
+await line.update({ status: 'busy' }); // 'idle' when the session waits for input
+await line.close(); // unregisters the line
+```
+
+- Use one `TelephoneClient` for each line (session name); one process can hold many.
+- The first client that finds no exchange starts `dist/exchange.mjs` from its package with Node.js 20 or later, detached, under `~/.pi-telephone` (`PI_TELEPHONE_HOME` overrides it).
+- `onMessage` is the acknowledgement: return `{ accepted: true }` or `{ accepted: false, reason }`. The exchange has already checked trust and the line's allowlist. `from` carries `address`, `session`, `machine`, `fqdn`, `login`, `displayName`, `harness` and `local`.
+- `connect()` returns the exchange: `version`, `features` and `machine`, whose `login` is the machine's owner.
+- A client reconnects and registers again by itself after the exchange restarts. It emits `connected`, `reconnected`, `disconnected` and `retrying` (with the error).
+- Send `to` with every reply, as above: after an exchange restart the exchange no longer knows where a message id came from.
+- `features: []` marks a host that cannot receive files; the exchange then refuses file sends to its lines.
+- `deferReplies: true` also passes replies to the host's own asks to `onMessage`, and the ask returns only after `resolveReply(message)`, so a host can store a reply before the asking tool sees it. `ask({ id })` sets the call's message id up front; `waiting(id)` tells whether that ask still waits.
+- Errors are `TelephoneError` objects with a `code`.
+- Do not call `shutdownExchange()` when the host stops: other sessions share the exchange. Close the host's own lines.
+
+Version skew:
+
+- A machine runs one exchange, from whichever installed copy of pi-telephone started it. After an upgrade, run `npx pi-telephone stop` once when no call is pending; the next client starts the exchange from its own copy.
+- A 0.3 client works with a 0.2.x exchange. A line with a harness name that 0.2.x does not know, such as `pi-fleet`, registers there as `cli` until the exchange restarts on 0.3.
+- A 0.3 exchange shows such names only to peers on 0.3 or later; 0.2.x peers see `cli`. Its messages carry `cli` until it has seen the peer's hello, which `list` and file sends fetch.
 
 ## Upgrading
 

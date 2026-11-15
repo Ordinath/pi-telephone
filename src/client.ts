@@ -8,7 +8,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { clientSocketPath, homePath, isFsError } from './config.js';
 import { readFrames, writeFrame } from './ndjson.js';
 import {
-  FEATURES, PROTO_VERSION, TelephoneError, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage,
+  CLIENT_FEATURES, PROTO_VERSION, TelephoneError, wireHarness, type Config, type Directory, type ExchangeInfo, type Harness, type InboundMessage,
   type SendInput, type SendResult, type ServerFrame, type Session, type SessionPatch, type TrustPatch,
 } from './protocol.js';
 export { TelephoneError } from './protocol.js';
@@ -18,7 +18,13 @@ export interface ClientOptions {
   onMessage: (message: InboundMessage) => Promise<{ accepted: boolean; reason?: string }>;
   home?: string;
   exchangeEntry?: string;
+  /** What this host can receive; default ['files']. Without 'files' the exchange refuses file sends to it. */
+  features?: string[];
+  /** Pass replies to this client's own asks to onMessage too; the ask returns only after resolveReply(message). */
+  deferReplies?: boolean;
 }
+// When the clients of one process start together, one spawns the exchange and the rest wait for its socket.
+const recentSpawns = new Map<string, number>();
 interface PendingRequest { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }
 interface ReplyWait { resolve: (message: InboundMessage) => void; reject: (error: Error) => void }
 export class TelephoneClient extends EventEmitter {
@@ -55,7 +61,8 @@ export class TelephoneClient extends EventEmitter {
         });
       } catch (error) {
         if (!isFsError(error, 'ENOENT') && !isFsError(error, 'ECONNREFUSED')) throw error;
-        if (!spawned) {
+        if (!spawned && Date.now() - (recentSpawns.get(this.home) ?? 0) > 2000) {
+          recentSpawns.set(this.home, Date.now());
           const entry = this.opts.exchangeEntry ?? fileURLToPath(new URL('../dist/exchange.mjs', import.meta.url));
           const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
             ['PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'].includes(key) || key.startsWith('PI_TELEPHONE_')));
@@ -92,9 +99,9 @@ export class TelephoneClient extends EventEmitter {
     });
     readFrames(socket, value => { void this.receive(value as ServerFrame, socket).catch(() => socket.destroy()); });
     try {
-      const result = await this.request<{ exchange: ExchangeInfo }>({ t: 'hello', proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: FEATURES } });
+      const result = await this.request<{ exchange: ExchangeInfo }>({ t: 'hello', proto: PROTO_VERSION, client: { harness: this.opts.harness, version: this.opts.version, pid: process.pid, features: this.opts.features ?? CLIENT_FEATURES } });
       if (this.registration) {
-        await this.request({ t: 'register', session: this.registration.session, allow: this.registration.allow });
+        await this.request({ t: 'register', session: this.wireSession(this.registration.session, result.exchange), allow: this.registration.allow });
         if (this.registration.status) await this.request({ t: 'update', status: this.registration.status });
       }
       this.info = result.exchange;
@@ -111,8 +118,9 @@ export class TelephoneClient extends EventEmitter {
     if (this.closed || this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
-      void this.connect().catch(() => {
+      void this.connect().catch((error: unknown) => {
         this.reconnectDelay = Math.min(this.reconnectDelay * 2, 5000);
+        this.emit('retrying', error);
         this.scheduleReconnect();
       });
     }, this.reconnectDelay);
@@ -130,7 +138,7 @@ export class TelephoneClient extends EventEmitter {
   private async receive(frame: ServerFrame, socket: Socket): Promise<void> {
     if (frame.t === 'deliver') {
       const message = frame.message;
-      const wait = message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : undefined;
+      const wait = !this.opts.deferReplies && message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : undefined;
       let ack: { accepted: boolean; reason?: string };
       if (wait) { this.replies.delete(message.replyTo!); wait.resolve(message); ack = { accepted: true }; }
       else {
@@ -146,9 +154,23 @@ export class TelephoneClient extends EventEmitter {
     if (frame.t === 'error') request.reject(new TelephoneError(frame.code, frame.message));
     else { const { t, rid, ...result } = frame; request.resolve(result); }
   }
+  // A 0.2.x exchange refuses harness names it does not know, so such a line registers as 'cli' until the exchange restarts.
+  private wireSession(session: Session, exchange: ExchangeInfo): Session {
+    return { ...session, harness: wireHarness(session.harness, exchange.features) as Harness };
+  }
+  /** With deferReplies: true when an ask of this client waits for message id `id`. */
+  waiting(id: string): boolean { return this.replies.has(id); }
+  /** With deferReplies: hand a reply to the ask that waits for it; false when none waits. */
+  resolveReply(message: InboundMessage): boolean {
+    const wait = message.isReplyToOwnCall && message.replyTo ? this.replies.get(message.replyTo) : undefined;
+    if (!wait) return false;
+    this.replies.delete(message.replyTo!);
+    wait.resolve(message);
+    return true;
+  }
   async register(session: Session, allow: string[] = ['owner']): Promise<string> {
-    await this.connect();
-    const result = await this.request<{ address: string }>({ t: 'register', session, allow });
+    const exchange = await this.connect();
+    const result = await this.request<{ address: string }>({ t: 'register', session: this.wireSession(session, exchange), allow });
     this.registration = { session: { ...session }, allow: [...allow] };
     return result.address;
   }
@@ -176,13 +198,15 @@ export class TelephoneClient extends EventEmitter {
   }
   async send(input: SendInput): Promise<SendResult> {
     await this.connect();
-    return this.request<SendResult>({ t: 'send', id: randomUUID(), ...input, files: this.fileInputs(input.files) });
+    return this.request<SendResult>({ t: 'send', ...input, id: input.id ?? randomUUID(), files: this.fileInputs(input.files) });
   }
-  async ask(input: { to: string; text: string; timeoutMs: number; signal?: AbortSignal; files?: string[] }): Promise<{ sent: SendResult; reply: InboundMessage }> {
+  /** `id` lets the host know the call's message id before the reply arrives; it must be a fresh UUID. */
+  async ask(input: { id?: string; to: string; text: string; timeoutMs: number; signal?: AbortSignal; files?: string[] }): Promise<{ sent: SendResult; reply: InboundMessage }> {
     await this.connect();
     const files = this.fileInputs(input.files);
     if (input.signal?.aborted) throw new TelephoneError('aborted');
-    const id = randomUUID();
+    const id = input.id ?? randomUUID();
+    if (this.replies.has(id)) throw new TelephoneError('invalid_id');
     let cancel: (error: Error) => void = () => {};
     let received: InboundMessage | undefined;
     const reply = new Promise<InboundMessage>((resolve, reject) => {
